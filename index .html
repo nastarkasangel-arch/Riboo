@@ -1,0 +1,3321 @@
+<!--
+  ============================================================================
+  abdelrezakbezzag — AI Workspace
+  Created by Abdelrezak Bezzag
+  ----------------------------------------------------------------------------
+  Single-file production build: HTML + CSS + JS.
+  Architecture: custom pub/sub state store, AES-GCM local-storage vault,
+  toast/notification system, keyboard shortcuts, live search, analytics
+  dashboard, JSON/CSV import-export, a real installable PWA (static
+  manifest.webmanifest + sw.js + PNG icon set, shipped alongside this file —
+  see GUIDE-PLAY-STORE.md), a Content-Security-Policy meta tag, a standalone
+  privacy.html page, and a global error boundary.
+
+  Honest engineering notes (read before deploying):
+  1. This app authenticates users entirely in the browser (localStorage).
+     That is fine for a personal/single-device tool or a prototype, but it
+     is NOT a substitute for real server-side authentication. Anyone with
+     access to this browser profile can read/reset the vault. For a
+     multi-user production deployment, replace `AuthService` with calls to
+     a real backend (sessions/JWT over HTTPS, salted+peppered hashing on
+     the server, rate limiting, etc).
+  2. "Local storage encryption" (see `Vault` below) uses a real AES-256-GCM
+     key generated with the Web Crypto API — but the key itself lives in
+     the same browser storage as the data, because there is no server or
+     user-supplied passphrase to derive it from. That means it stops
+     casual inspection of raw localStorage values and protects against a
+     class of data-scraping bugs, but it does not protect the data from
+     someone who fully controls this browser/profile. True secrecy needs a
+     secret that lives outside the client (a server, or a user passphrase
+     that is never persisted).
+  3. Calling a third-party generative AI API directly from client-side code
+     means any API key embedded in this file is extractable by anyone who
+     opens dev tools. This build deliberately ships with NO embedded key
+     and does NOT ask the user for one either: every request goes through
+     this app's own serverless proxy (api/generateTextOpenRouter.js), and
+     only that server-side function ever sees the real OPENROUTER_API_KEY,
+     read from Vercel's Environment Variables. The browser never holds it.
+  4. Single-provider architecture: every text reply goes through ONE
+     serverless function, api/generateTextOpenRouter.js, which calls
+     OpenRouter (https://openrouter.ai). OpenRouter is itself a router in
+     front of dozens of underlying models, so this is not a step down from
+     the old multi-provider chain — model choice still lives in Settings,
+     it is just expressed as an OpenRouter model id (e.g.
+     "deepseek/deepseek-chat:free"). The function reads its key from
+     Vercel's Environment Variables (OPENROUTER_API_KEY) — never from
+     client code. See the setup notes near AI_PROXY_URL below.
+     Reliability without a second provider: the client streams the reply
+     first, and on a retryable failure (429 / 5xx) retries the same
+     endpoint with a short backoff before giving up — see
+     ChatManager.requestText() and ChatManager._withRetry(). No
+     Gemini/DeepSeek code paths remain in this file.
+  5. "Stop generating": while a reply is streaming or loading, the send
+     button turns into a stop button (`ChatManager.stopGenerating()`) that
+     aborts the in-flight request via AbortController instead of leaving
+     the user stuck waiting.
+  ============================================================================
+-->
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a1a" id="themeColorMeta">
+<meta name="description" content="مساحة عمل ذكاء اصطناعي شخصية — محادثة، لوحة تحليلات، واستيراد وتصدير بياناتك.">
+<meta name="developer" content="Abdelrezak Bezzag (abdelrekbezzag)">
+<title>abdelrezakbezzag - الذكاء الاصطناعي</title>
+<!--
+  ملاحظة نشر مهمة: الوسوم أدناه (manifest / apple-touch-icon) تشير لملفات
+  حقيقية (manifest.webmanifest, /icons/icon-*.png) يجب رفعها بجانب هذا
+  الملف على نفس الدومين. هذه الملفات مرفقة معك في نفس التسليم. بدونها
+  تبقى الوسوم صامتة (404 غير قاتل) والتطبيق يشتغل عادي، لكن التثبيت
+  كـ PWA حقيقية والتغليف كـ TWA لـ Google Play يحتاجانها فعلياً — شوف
+  GUIDE-PLAY-STORE.md.
+-->
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-180.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="abdelrezakbezzag">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://openrouter.ai https://accounts.google.com; frame-src https://accounts.google.com; base-uri 'self'; form-action 'self'; object-src 'none'">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%23ec4899'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='100' height='100' rx='24' fill='url(%23g)'/%3E%3Ctext x='50' y='68' font-size='56' font-family='Arial' font-weight='900' fill='white' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E">
+<style>
+    :root {
+        --primary: #6366f1;
+        --primary-light: #818cf8;
+        --primary-glow: #a5b4fc;
+        --primary-dark: #4f46e5;
+        --secondary: #ec4899;
+        --secondary-light: #f472b6;
+        --bg: #0a0a1a;
+        --bg-light: #13132a;
+        --surface: rgba(19, 19, 42, 0.75);
+        --surface-solid: #13132a;
+        --surface-elevated: rgba(28, 28, 56, 0.9);
+        --text: #f8fafc;
+        --text-secondary: #94a3b8;
+        --border: rgba(148, 163, 184, 0.12);
+        --success: #22c55e;
+        --error: #ef4444;
+        --warning: #f59e0b;
+        --info: #38bdf8;
+        --shadow-strong: rgba(0, 0, 0, 0.6);
+        --topbar-bg: rgba(10, 10, 26, 0.85);
+        --code-bg: #060614;
+        --scrollbar: rgba(99, 102, 241, 0.3);
+        --transition-fast: 0.2s;
+        --transition-med: 0.3s;
+    }
+
+    [data-theme="light"] {
+        --primary: #4f46e5;
+        --primary-light: #6366f1;
+        --primary-glow: #4338ca;
+        --primary-dark: #4338ca;
+        --secondary: #db2777;
+        --secondary-light: #ec4899;
+        --bg: #f4f5fb;
+        --bg-light: #ffffff;
+        --surface: rgba(255, 255, 255, 0.78);
+        --surface-solid: #ffffff;
+        --surface-elevated: rgba(255, 255, 255, 0.96);
+        --text: #1e1b2e;
+        --text-secondary: #5b5876;
+        --border: rgba(30, 27, 46, 0.1);
+        --success: #16a34a;
+        --error: #dc2626;
+        --warning: #d97706;
+        --info: #0284c7;
+        --shadow-strong: rgba(30, 27, 46, 0.16);
+        --topbar-bg: rgba(255, 255, 255, 0.85);
+        --code-bg: #0f0e1a;
+        --scrollbar: rgba(79, 70, 229, 0.25);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html { color-scheme: dark; }
+    [data-theme="light"] ~ html, html:has([data-theme="light"]) { color-scheme: light; }
+
+    /* ---- Stable-touch fix: stop iOS/Android rubber-band bounce & pull-to-refresh
+       so the screen doesn't shift/jump when the user taps or drags on it ---- */
+    html, body {
+        height: 100%;
+        overscroll-behavior: none;
+    }
+
+    body {
+        font-family: 'Cairo', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        min-height: 100dvh;
+        overflow-x: hidden;
+        touch-action: manipulation;
+        transition: background var(--transition-med), color var(--transition-med);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+            animation-duration: 0.001ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.001ms !important;
+            scroll-behavior: auto !important;
+        }
+    }
+
+    a { color: inherit; }
+    button { font-family: inherit; }
+    :focus-visible {
+        outline: 2px solid var(--primary-light);
+        outline-offset: 2px;
+        border-radius: 4px;
+    }
+
+    .bg-animation {
+        position: fixed;
+        top: 0; left: 0; width: 100%; height: 100%;
+        z-index: -1;
+        background:
+            radial-gradient(ellipse at 15% 15%, rgba(99, 102, 241, 0.2) 0%, transparent 50%),
+            radial-gradient(ellipse at 85% 85%, rgba(236, 72, 153, 0.15) 0%, transparent 50%),
+            radial-gradient(ellipse at 50% 50%, rgba(129, 140, 248, 0.08) 0%, transparent 60%),
+            linear-gradient(135deg, var(--bg) 0%, var(--bg-light) 50%, var(--bg) 100%);
+        transition: background var(--transition-med);
+    }
+
+    [data-theme="light"] .bg-animation {
+        background:
+            radial-gradient(ellipse at 15% 15%, rgba(99, 102, 241, 0.10) 0%, transparent 50%),
+            radial-gradient(ellipse at 85% 85%, rgba(236, 72, 153, 0.08) 0%, transparent 50%),
+            radial-gradient(ellipse at 50% 50%, rgba(129, 140, 248, 0.05) 0%, transparent 60%),
+            linear-gradient(135deg, #eef0fb 0%, #ffffff 50%, #f4f5fb 100%);
+    }
+
+    .bg-animation::before {
+        content: '';
+        position: absolute;
+        top: -50%; left: -50%;
+        width: 200%; height: 200%;
+        background:
+            repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(99, 102, 241, 0.03) 2px, rgba(99, 102, 241, 0.03) 4px),
+            repeating-linear-gradient(90deg, transparent, transparent 2px, rgba(236, 72, 153, 0.02) 2px, rgba(236, 72, 153, 0.02) 4px);
+        animation: scan 15s linear infinite;
+    }
+
+    .stars { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }
+    [data-theme="light"] .stars { display: none; }
+
+    .star {
+        position: absolute;
+        width: 2px; height: 2px;
+        background: white;
+        border-radius: 50%;
+        animation: twinkle var(--duration) ease-in-out infinite;
+        opacity: 0;
+    }
+
+    @keyframes twinkle {
+        0%, 100% { opacity: 0; transform: scale(0.5); }
+        50% { opacity: var(--opacity); transform: scale(1); }
+    }
+
+    @keyframes scan { 0% { transform: translateY(0); } 100% { transform: translateY(50px); } }
+
+    .auth-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+
+    .auth-box {
+        width: 100%; max-width: 480px;
+        background: var(--surface);
+        backdrop-filter: blur(24px);
+        border: 1px solid var(--border);
+        border-radius: 28px;
+        padding: 3rem;
+        box-shadow: 0 25px 60px -12px var(--shadow-strong), 0 0 0 1px rgba(99, 102, 241, 0.1);
+        animation: slideUp 0.6s ease;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .auth-box::before {
+        content: '';
+        position: absolute; top: 0; left: 0; right: 0; height: 3px;
+        background: linear-gradient(90deg, var(--primary), var(--secondary), var(--primary-light));
+        animation: gradientMove 3s linear infinite;
+        background-size: 200% 100%;
+    }
+
+    @keyframes gradientMove { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
+    @keyframes slideUp { from { opacity: 0; transform: translateY(40px); } to { opacity: 1; transform: translateY(0); } }
+
+    .auth-logo { text-align: center; margin-bottom: 2rem; }
+
+    .auth-logo-icon {
+        width: 80px; height: 80px;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        border-radius: 24px;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-size: 2.2rem; font-weight: 900; color: white;
+        margin-bottom: 1rem;
+        box-shadow: 0 0 50px rgba(99, 102, 241, 0.5), 0 0 100px rgba(236, 72, 153, 0.2);
+        animation: pulse 3s ease-in-out infinite;
+        position: relative;
+    }
+
+    .auth-logo-icon::after {
+        content: '';
+        position: absolute; inset: -3px; border-radius: 27px;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        z-index: -1; opacity: 0.5;
+        animation: pulse 3s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% { box-shadow: 0 0 50px rgba(99, 102, 241, 0.5), 0 0 100px rgba(236, 72, 153, 0.2); transform: scale(1); }
+        50% { box-shadow: 0 0 70px rgba(99, 102, 241, 0.7), 0 0 140px rgba(236, 72, 153, 0.3); transform: scale(1.02); }
+    }
+
+    .auth-logo h1 {
+        font-size: 1.9rem; font-weight: 800;
+        background: linear-gradient(135deg, var(--text), var(--primary-glow), var(--secondary-light));
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+
+    .auth-logo p { color: var(--text-secondary); margin-top: 0.5rem; font-size: 0.95rem; }
+
+    .form-group { margin-bottom: 1.25rem; }
+    .form-group label { display: block; margin-bottom: 0.5rem; font-weight: 600; font-size: 0.9rem; color: var(--text-secondary); }
+
+    .form-input {
+        width: 100%;
+        padding: 1rem 1.25rem;
+        background: rgba(10, 10, 26, 0.06);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 1rem;
+        transition: all var(--transition-med);
+        outline: none;
+    }
+    [data-theme="dark"] .form-input, :root:not([data-theme="light"]) .form-input { background: rgba(10, 10, 26, 0.6); }
+
+    .form-input:focus {
+        border-color: var(--primary-light);
+        box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15), 0 0 20px rgba(99, 102, 241, 0.1);
+    }
+    .form-input::placeholder { color: var(--text-secondary); opacity: 0.5; }
+    .form-hint { font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.4rem; line-height: 1.5; }
+
+    .field-error {
+        color: var(--error);
+        font-size: 0.78rem;
+        margin-top: 0.4rem;
+        display: none;
+    }
+    .form-group.invalid .form-input { border-color: var(--error); }
+    .form-group.invalid .field-error { display: block; }
+
+    .btn {
+        width: 100%; padding: 1rem;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        color: white; border: none; border-radius: 16px;
+        font-family: inherit; font-size: 1rem; font-weight: 700;
+        cursor: pointer; transition: all var(--transition-med);
+        position: relative; overflow: hidden;
+    }
+    .btn::before {
+        content: '';
+        position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+        transition: left 0.5s;
+    }
+    .btn:hover::before { left: 100%; }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 15px 40px rgba(99, 102, 241, 0.4), 0 0 60px rgba(236, 72, 153, 0.2); }
+    .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+    .btn-secondary { background: transparent; border: 1px solid var(--border); margin-top: 0.75rem; position: relative; color: var(--text); }
+    .btn-secondary:hover { background: rgba(99, 102, 241, 0.1); border-color: var(--primary-light); box-shadow: 0 10px 30px rgba(99, 102, 241, 0.2); }
+
+    .btn-danger { background: linear-gradient(135deg, var(--error), #b91c1c); }
+    .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); width: auto; padding: 0.6rem 1.1rem; font-size: 0.85rem; }
+    .btn-ghost:hover { background: rgba(99,102,241,0.1); border-color: var(--primary-light); box-shadow: none; transform: none; }
+    .btn-sm { width: auto; padding: 0.6rem 1.2rem; font-size: 0.85rem; }
+
+    .auth-footer { text-align: center; margin-top: 1.5rem; color: var(--text-secondary); font-size: 0.9rem; }
+    .auth-footer a { color: var(--primary-glow); text-decoration: none; font-weight: 600; cursor: pointer; transition: color var(--transition-med); }
+    .auth-footer a:hover { color: var(--secondary-light); }
+
+    .app { display: none; }
+    .app.active {
+        display: flex; flex-direction: column;
+        height: 100vh; height: 100dvh;
+        overflow: hidden;
+    }
+
+    .sidebar {
+        position: fixed; top: 0; right: 0; width: 300px; height: 100vh;
+        background: var(--surface);
+        backdrop-filter: blur(24px);
+        border-left: 1px solid var(--border);
+        z-index: 200; padding: 1.5rem;
+        transform: translateX(0);
+        transition: transform var(--transition-med) ease;
+        display: flex; flex-direction: column;
+    }
+
+    .sidebar-header { display: flex; align-items: center; gap: 0.75rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--border); margin-bottom: 1.1rem; }
+    .sidebar-header .logo-icon {
+        width: 44px; height: 44px;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        border-radius: 14px; display: flex; align-items: center; justify-content: center;
+        font-weight: 800; color: white; font-size: 1.2rem;
+        box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+        flex-shrink: 0;
+    }
+    .sidebar-header h2 {
+        font-size: 1.05rem; font-weight: 700;
+        background: linear-gradient(135deg, var(--text), var(--primary-glow));
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    .new-chat-btn {
+        width: 100%; padding: 0.875rem;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        color: white; border: none; border-radius: 14px;
+        font-family: inherit; font-weight: 600; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+        margin-bottom: 1rem; transition: all var(--transition-med);
+        box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+    }
+    .new-chat-btn:hover { box-shadow: 0 8px 30px rgba(99, 102, 241, 0.5), 0 0 40px rgba(236, 72, 153, 0.2); transform: translateY(-2px); }
+
+    .search-box {
+        position: relative;
+        margin-bottom: 1rem;
+    }
+    .search-box svg {
+        position: absolute; top: 50%; right: 0.85rem; transform: translateY(-50%);
+        color: var(--text-secondary); pointer-events: none;
+    }
+    .search-box input {
+        width: 100%;
+        padding: 0.7rem 2.4rem 0.7rem 0.9rem;
+        background: rgba(148, 163, 184, 0.08);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 0.85rem;
+        outline: none;
+        transition: all var(--transition-fast);
+    }
+    .search-box input:focus { border-color: var(--primary-light); box-shadow: 0 0 0 3px rgba(99,102,241,0.12); }
+    .search-box .clear-search {
+        position: absolute; top: 50%; left: 0.6rem; transform: translateY(-50%);
+        background: none; border: none; color: var(--text-secondary); cursor: pointer;
+        display: none; padding: 2px;
+    }
+    .search-box.has-value .clear-search { display: block; }
+
+    .chat-history { flex: 1; overflow-y: auto; }
+    .history-empty { padding: 1.5rem 0.5rem; text-align: center; color: var(--text-secondary); font-size: 0.85rem; }
+
+    .history-item {
+        padding: 0.8rem 0.9rem; border-radius: 12px; cursor: pointer;
+        transition: all var(--transition-fast);
+        display: flex; align-items: center; gap: 0.6rem;
+        color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 0.3rem;
+        border-right: 3px solid transparent;
+        position: relative;
+    }
+    .history-item:hover { background: rgba(99, 102, 241, 0.1); color: var(--text); border-right-color: var(--primary-light); }
+    .history-item.active { background: rgba(99, 102, 241, 0.15); color: var(--text); border-right-color: var(--secondary); }
+    .history-item mark { background: rgba(236,72,153,0.35); color: inherit; border-radius: 3px; }
+    .history-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .history-item .item-actions { display: none; gap: 0.25rem; }
+    .history-item:hover .item-actions { display: flex; }
+    .item-action-btn {
+        background: none; border: none; color: var(--text-secondary); cursor: pointer;
+        padding: 3px; border-radius: 6px; display: flex; align-items: center;
+    }
+    .item-action-btn:hover { background: rgba(148,163,184,0.15); color: var(--text); }
+
+    .sidebar-footer { padding-top: 0.9rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.5rem; }
+    .sidebar-tools { display: flex; gap: 0.4rem; margin-bottom: 0.4rem; }
+    .sidebar-tools .icon-btn { flex: 1; }
+
+    .user-info { display: flex; align-items: center; gap: 0.75rem; padding: 0.8rem; border-radius: 14px; cursor: pointer; transition: all var(--transition-fast); }
+    .user-info:hover { background: rgba(99, 102, 241, 0.1); }
+    .user-avatar {
+        width: 38px; height: 38px;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        border-radius: 50%; display: flex; align-items: center; justify-content: center;
+        font-weight: 700; font-size: 0.9rem; color: white; flex-shrink: 0;
+    }
+    .user-details { overflow: hidden; }
+    .user-details h4 { font-size: 0.9rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .user-details p { font-size: 0.75rem; color: var(--text-secondary); }
+
+    .main { margin-right: 300px; flex: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
+
+    .top-bar {
+        padding: 0.85rem 2rem;
+        display: flex; align-items: center; justify-content: space-between;
+        border-bottom: 1px solid var(--border);
+        background: var(--topbar-bg);
+        backdrop-filter: blur(15px);
+        position: sticky; top: 0; z-index: 100;
+        gap: 0.75rem;
+    }
+    .top-bar-left, .top-bar-right { display: flex; align-items: center; gap: 0.5rem; }
+    .top-bar-right { flex-wrap: nowrap; }
+
+    .model-selector {
+        display: flex; align-items: center; gap: 0.5rem;
+        padding: 0.5rem 1.1rem;
+        background: rgba(99, 102, 241, 0.1);
+        border: 1px solid var(--border);
+        border-radius: 100px; color: var(--primary-glow);
+        font-weight: 600; font-size: 0.85rem; cursor: pointer;
+        transition: all var(--transition-med);
+        white-space: nowrap;
+    }
+    .model-selector:hover { background: rgba(99, 102, 241, 0.2); border-color: var(--primary-light); }
+    .model-selector .dot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; animation: blink 2s infinite; box-shadow: 0 0 8px var(--success); flex-shrink: 0; }
+    .model-selector .dot.offline { background: var(--text-secondary); box-shadow: none; animation: none; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    .icon-btn {
+        width: 42px; height: 42px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        color: var(--text);
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer; transition: all var(--transition-med);
+        flex-shrink: 0;
+        position: relative;
+    }
+    .icon-btn:hover { background: rgba(99, 102, 241, 0.12); border-color: var(--primary-light); color: var(--primary-glow); }
+    .icon-btn.active { background: rgba(99,102,241,0.18); border-color: var(--primary-light); color: var(--primary-glow); }
+
+    .install-btn { display: none; align-items: center; gap: 0.5rem; }
+    .install-btn.show { display: flex; }
+
+    .theme-icon-sun, .theme-icon-moon { display: none; }
+    [data-theme="dark"] .theme-icon-moon { display: block; }
+    [data-theme="light"] .theme-icon-sun { display: block; }
+
+    .chat-area {
+        flex: 1; display: flex; flex-direction: column; max-width: 900px; width: 100%; margin: 0 auto; padding: 2rem;
+        overflow-y: auto; overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+        touch-action: pan-y;
+        min-height: 0;
+    }
+    .chat-history { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
+    .input-container, .top-bar { flex-shrink: 0; }
+
+    .welcome { text-align: center; padding: 3.5rem 2rem; animation: fadeIn 0.8s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+    .welcome h1 {
+        font-size: 2.6rem; font-weight: 900; margin-bottom: 1rem;
+        background: linear-gradient(135deg, var(--text), var(--primary-glow), var(--secondary-light));
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        line-height: 1.3;
+    }
+    .welcome p { color: var(--text-secondary); font-size: 1.05rem; max-width: 500px; margin: 0 auto 2.25rem; line-height: 1.8; }
+
+    .suggestion-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; max-width: 600px; margin: 0 auto; }
+    .suggestion-card {
+        padding: 1.25rem; background: var(--surface); border: 1px solid var(--border);
+        border-radius: 18px; cursor: pointer; transition: all var(--transition-med);
+        text-align: right; position: relative; overflow: hidden;
+    }
+    .suggestion-card::before {
+        content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+        background: linear-gradient(90deg, var(--primary), var(--secondary));
+        opacity: 0; transition: opacity var(--transition-med);
+    }
+    .suggestion-card:hover::before { opacity: 1; }
+    .suggestion-card:hover { border-color: var(--primary-light); transform: translateY(-4px); box-shadow: 0 15px 40px var(--shadow-strong), 0 0 30px rgba(99, 102, 241, 0.1); }
+    .suggestion-card h4 { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.35rem; }
+    .suggestion-card p { font-size: 0.8rem; color: var(--text-secondary); }
+
+    .messages { flex: 1; overflow-y: auto; padding: 1rem 0; display: flex; flex-direction: column; gap: 1.5rem; }
+    .msg { display: flex; gap: 1rem; animation: msgIn 0.4s ease; }
+    @keyframes msgIn { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+
+    .msg-avatar { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.85rem; flex-shrink: 0; }
+    .msg.user .msg-avatar { background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; order: 2; box-shadow: 0 0 15px rgba(99, 102, 241, 0.4); }
+    .msg.bot .msg-avatar { background: var(--bg-light); color: var(--primary-glow); border: 1px solid var(--border); box-shadow: 0 0 15px rgba(99, 102, 241, 0.1); }
+
+    .msg-content { max-width: 80%; padding: 1rem 1.25rem; border-radius: 20px; line-height: 1.9; font-size: 0.95rem; }
+    .msg.user { flex-direction: row-reverse; }
+    .msg.user .msg-content { background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: #fff; border-bottom-right-radius: 4px; box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3); }
+    .msg.bot .msg-content { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; box-shadow: 0 4px 20px var(--shadow-strong); }
+    .msg.bot.msg-error .msg-content { border-color: rgba(239,68,68,0.4); }
+
+    .msg-content pre { background: var(--code-bg); padding: 1rem; border-radius: 12px; overflow-x: auto; margin: 0.75rem 0; direction: ltr; text-align: left; border: 1px solid var(--border); box-shadow: inset 0 0 20px rgba(0,0,0,0.3); }
+    .msg-content code { background: rgba(99, 102, 241, 0.15); padding: 0.2rem 0.5rem; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 0.85rem; color: var(--primary-glow); }
+    .msg-content pre code { background: none; padding: 0; color: #e2e8f0; }
+    .msg-content strong { color: var(--primary-glow); }
+    .msg-content a { color: var(--secondary-light); text-decoration: none; word-break: break-all; }
+    .msg-content a:hover { text-decoration: underline; }
+    .msg-content ul, .msg-content ol { padding-right: 1.25rem; margin: 0.5rem 0; }
+    .msg-meta { font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.5rem; display: flex; gap: 0.6rem; align-items: center; opacity: 0.7; }
+    .msg-copy-btn { background: none; border: none; color: inherit; cursor: pointer; opacity: 0.7; padding: 2px; }
+    .msg-copy-btn:hover { opacity: 1; }
+
+    .typing-indicator { display: flex; align-items: center; gap: 0.75rem; padding: 1rem 0; }
+    .typing-bubble { display: flex; gap: 4px; padding: 1rem 1.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; border-bottom-left-radius: 4px; }
+    .typing-bubble span { width: 8px; height: 8px; background: linear-gradient(135deg, var(--primary), var(--secondary)); border-radius: 50%; animation: typingBounce 1.4s infinite ease-in-out; }
+    .typing-bubble span:nth-child(1) { animation-delay: 0s; }
+    .typing-bubble span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-bubble span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typingBounce { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }
+
+    .input-container { padding: 1.25rem 2rem 1.75rem; }
+    .input-hint { max-width: 900px; margin: 0 auto 0.5rem; font-size: 0.72rem; color: var(--text-secondary); text-align: center; opacity: 0.7; }
+    .input-box {
+        max-width: 900px; margin: 0 auto;
+        background: var(--surface); backdrop-filter: blur(24px);
+        border: 1px solid var(--border); border-radius: 24px;
+        padding: 1rem 1.25rem; display: flex; align-items: flex-end; gap: 0.75rem;
+        transition: all var(--transition-med);
+        box-shadow: 0 4px 30px var(--shadow-strong);
+    }
+    .input-box:focus-within { border-color: var(--primary-light); box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1), 0 0 40px rgba(99, 102, 241, 0.15); }
+    .input-box textarea { flex: 1; background: transparent; border: none; color: var(--text); font-family: inherit; font-size: 1rem; line-height: 1.6; resize: none; outline: none; max-height: 150px; min-height: 24px; }
+    .input-box textarea::placeholder { color: var(--text-secondary); opacity: 0.5; }
+
+    .send-icon {
+        width: 44px; height: 44px;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        border: none; border-radius: 14px; color: white; cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        transition: all var(--transition-med); flex-shrink: 0;
+        box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+    }
+    .send-icon:hover { transform: scale(1.08); box-shadow: 0 8px 25px rgba(99, 102, 241, 0.5), 0 0 30px rgba(236, 72, 153, 0.2); }
+    .send-icon:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+    /* "Stop generating" state: swaps the gradient for a solid warning color
+       so it reads clearly as a different action, not just a disabled send. */
+    .send-icon.is-stop {
+        background: var(--error);
+        box-shadow: 0 4px 15px rgba(239, 68, 68, 0.35);
+        cursor: pointer;
+    }
+    .send-icon.is-stop:hover { box-shadow: 0 8px 25px rgba(239, 68, 68, 0.5); }
+    .send-icon.is-stop:disabled { opacity: 1; cursor: pointer; }
+
+    .msg-provider-note {
+        font-size: 0.72rem;
+        color: var(--text-secondary);
+        margin-top: 0.35rem;
+        opacity: 0.75;
+    }
+
+    /* Toast stack */
+    .toast-container { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 3000; display: flex; flex-direction: column-reverse; gap: 0.6rem; align-items: center; width: min(92vw, 420px); }
+    .toast {
+        position: relative;
+        width: 100%;
+        background: var(--surface-elevated);
+        color: var(--text);
+        padding: 0.9rem 1.1rem;
+        border-radius: 14px;
+        font-weight: 600; font-size: 0.88rem;
+        box-shadow: 0 10px 30px var(--shadow-strong);
+        border: 1px solid var(--border);
+        border-inline-start: 4px solid var(--info);
+        opacity: 0; transform: translateY(20px);
+        transition: all 0.35s cubic-bezier(.2,.9,.3,1.3);
+        display: flex; align-items: flex-start; gap: 0.6rem;
+        overflow: hidden;
+        cursor: pointer;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.success { border-inline-start-color: var(--success); }
+    .toast.error { border-inline-start-color: var(--error); }
+    .toast.warning { border-inline-start-color: var(--warning); }
+    .toast-icon { flex-shrink: 0; margin-top: 1px; }
+    .toast-msg { flex: 1; line-height: 1.5; }
+    .toast-progress { position: absolute; bottom: 0; right: 0; left: 0; height: 3px; background: rgba(148,163,184,0.25); }
+    .toast-progress::after { content: ''; display: block; height: 100%; background: currentColor; width: 100%; animation: toastShrink linear forwards; }
+    @keyframes toastShrink { from { width: 100%; } to { width: 0%; } }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.5); }
+
+    /* Modals */
+    .modal-overlay {
+        position: fixed; inset: 0; background: rgba(4,4,12,0.66);
+        backdrop-filter: blur(6px);
+        z-index: 500; display: none; align-items: center; justify-content: center; padding: 1.25rem;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal {
+        width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto;
+        background: var(--surface-elevated); backdrop-filter: blur(20px);
+        border: 1px solid var(--border); border-radius: 24px;
+        box-shadow: 0 30px 80px var(--shadow-strong);
+        animation: modalIn 0.28s cubic-bezier(.2,.9,.3,1.1);
+    }
+    .modal.modal-wide { max-width: 760px; }
+    @keyframes modalIn { from { opacity: 0; transform: translateY(24px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+    .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 1.4rem 1.6rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface-elevated); z-index: 2; border-radius: 24px 24px 0 0; }
+    .modal-header h3 { font-size: 1.15rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
+    .modal-close { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 0.4rem; border-radius: 10px; display: flex; }
+    .modal-close:hover { background: rgba(148,163,184,0.15); color: var(--text); }
+    .modal-body { padding: 1.4rem 1.6rem; }
+    .modal-footer { padding: 1.1rem 1.6rem; border-top: 1px solid var(--border); display: flex; gap: 0.75rem; justify-content: flex-end; flex-wrap: wrap; }
+
+    .settings-section { margin-bottom: 1.6rem; }
+    .settings-section:last-child { margin-bottom: 0; }
+    .settings-section h4 { font-size: 0.82rem; text-transform: none; color: var(--text-secondary); font-weight: 700; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+    .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.6rem 0; }
+    .settings-row-label { font-size: 0.9rem; font-weight: 600; }
+    .settings-row-desc { font-size: 0.76rem; color: var(--text-secondary); margin-top: 0.2rem; line-height: 1.5; }
+    .segmented { display: flex; background: rgba(148,163,184,0.1); border-radius: 12px; padding: 3px; gap: 2px; }
+    .segmented button { border: none; background: none; color: var(--text-secondary); padding: 0.45rem 0.85rem; border-radius: 9px; font-family: inherit; font-size: 0.82rem; font-weight: 600; cursor: pointer; transition: all var(--transition-fast); }
+    .segmented button.active { background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; }
+
+    .toggle-switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; inset: 0; background: rgba(148,163,184,0.3); border-radius: 999px; cursor: pointer; transition: all var(--transition-fast); }
+    .toggle-slider::before { content: ''; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: all var(--transition-fast); box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
+    .toggle-switch input:checked + .toggle-slider { background: linear-gradient(135deg, var(--primary), var(--secondary)); }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(-20px); }
+    [dir="rtl"] .toggle-slider::before { left: auto; right: 3px; }
+    [dir="rtl"] .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
+
+    .kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; padding: 0.2rem 0.5rem; background: rgba(148,163,184,0.14); border: 1px solid var(--border); border-radius: 7px; font-size: 0.75rem; font-family: 'Courier New', monospace; color: var(--text); }
+    .shortcut-row { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
+    .shortcut-row:last-child { border-bottom: none; }
+    .shortcut-keys { display: flex; gap: 0.3rem; }
+
+    .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.85rem; margin-bottom: 1.5rem; }
+    .stat-card { background: rgba(99,102,241,0.08); border: 1px solid var(--border); border-radius: 16px; padding: 1rem; text-align: center; }
+    .stat-card .stat-value { font-size: 1.6rem; font-weight: 800; background: linear-gradient(135deg, var(--primary-glow), var(--secondary-light)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .stat-card .stat-label { font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; }
+
+    .chart-wrap { background: rgba(148,163,184,0.05); border: 1px solid var(--border); border-radius: 16px; padding: 1.1rem; margin-bottom: 1rem; }
+    .chart-title { font-size: 0.85rem; font-weight: 700; margin-bottom: 0.9rem; color: var(--text-secondary); }
+    .bar-chart { display: flex; align-items: flex-end; gap: 0.5rem; height: 130px; }
+    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 0.4rem; }
+    .bar { width: 100%; max-width: 34px; border-radius: 6px 6px 2px 2px; background: linear-gradient(180deg, var(--primary-light), var(--primary)); transition: height 0.6s cubic-bezier(.2,.9,.3,1.1); position: relative; min-height: 3px; }
+    .bar-col .bar-value { font-size: 0.68rem; color: var(--text-secondary); }
+    .bar-col .bar-label { font-size: 0.68rem; color: var(--text-secondary); }
+    .word-tag-list { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    .word-tag { background: rgba(236,72,153,0.12); color: var(--secondary-light); border: 1px solid rgba(236,72,153,0.25); padding: 0.3rem 0.7rem; border-radius: 999px; font-size: 0.76rem; font-weight: 600; }
+
+    .empty-dashboard { text-align: center; padding: 2rem 1rem; color: var(--text-secondary); }
+
+    .confirm-modal .modal-body { text-align: center; padding-top: 0.5rem; }
+    .confirm-icon { width: 56px; height: 56px; border-radius: 50%; background: rgba(239,68,68,0.12); color: var(--error); display: flex; align-items: center; justify-content: center; margin: 0 auto 1rem; }
+
+    .drop-zone {
+        border: 2px dashed var(--border); border-radius: 16px; padding: 1.5rem; text-align: center;
+        color: var(--text-secondary); font-size: 0.85rem; cursor: pointer; transition: all var(--transition-fast);
+    }
+    .drop-zone:hover, .drop-zone.dragover { border-color: var(--primary-light); background: rgba(99,102,241,0.06); color: var(--text); }
+    .data-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.8rem; }
+    .data-actions .btn-ghost { flex: 1; min-width: 130px; }
+
+    .api-key-row { display: flex; gap: 0.5rem; }
+    .api-key-row .form-input { flex: 1; }
+    .visibility-btn { width: 48px; flex-shrink: 0; background: rgba(148,163,184,0.1); border: 1px solid var(--border); border-radius: 14px; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+    .visibility-btn:hover { color: var(--text); }
+
+    .badge { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.55rem; border-radius: 999px; }
+    .badge.ok { background: rgba(34,197,94,0.14); color: var(--success); }
+    .badge.warn { background: rgba(245,158,11,0.14); color: var(--warning); }
+
+    .about-footer { text-align: center; font-size: 0.72rem; color: var(--text-secondary); padding: 0.8rem 1.6rem 1.3rem; opacity: 0.75; }
+
+    @media (max-width: 1024px) {
+        .sidebar { transform: translateX(100%); }
+        .sidebar.open { transform: translateX(0); }
+        .main { margin-right: 0; }
+        .menu-toggle { display: flex !important; }
+    }
+
+    @media (max-width: 768px) {
+        .auth-box { padding: 2rem 1.5rem; }
+        .welcome h1 { font-size: 1.9rem; }
+        .suggestion-grid { grid-template-columns: 1fr; }
+        .chat-area { padding: 1rem; }
+        .msg-content { max-width: 90%; }
+        .top-bar { padding: 0.75rem 1rem; }
+        .model-selector span:not(.dot) { display: none; }
+        .install-btn span { display: none; }
+        .modal { max-height: 94vh; border-radius: 20px 20px 0 0; align-self: flex-end; }
+        .modal-overlay { align-items: flex-end; padding: 0; }
+        .dashboard-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    /* ---- Google Sign-In ---- */
+    .google-btn {
+        width: 100%; padding: 0.85rem; margin-top: 0.9rem;
+        display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+        background: var(--surface-solid); border: 1px solid var(--border); border-radius: 16px;
+        color: var(--text); font-family: inherit; font-size: 0.92rem; font-weight: 700; cursor: pointer;
+        transition: all var(--transition-fast);
+    }
+    .google-btn:hover { border-color: var(--primary-light); box-shadow: 0 8px 24px rgba(99,102,241,0.15); }
+    .or-divider { display: flex; align-items: center; gap: 0.75rem; margin: 1.1rem 0 0.2rem; color: var(--text-secondary); font-size: 0.78rem; }
+    .or-divider::before, .or-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    #googleBtnLogin, #googleBtnRegister { display: flex; justify-content: center; margin-top: 0.6rem; min-height: 40px; }
+
+    /* ---- Chat toolbar (attach / web search / image mode) ---- */
+    .input-toolbar { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+    .tool-toggle {
+        display: flex; align-items: center; gap: 0.4rem;
+        padding: 0.45rem 0.8rem; border-radius: 100px;
+        background: rgba(148,163,184,0.08); border: 1px solid var(--border);
+        color: var(--text-secondary); font-size: 0.78rem; font-weight: 700; cursor: pointer;
+        transition: all var(--transition-fast); white-space: nowrap;
+    }
+    .tool-toggle:hover { color: var(--text); border-color: var(--primary-light); }
+    .tool-toggle.active { background: linear-gradient(135deg, var(--primary), var(--secondary)); border-color: transparent; color: #fff; }
+
+    /* ---- Attached file chips ---- */
+    .attach-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem; }
+    .attach-chip {
+        display: flex; align-items: center; gap: 0.5rem;
+        background: rgba(99,102,241,0.1); border: 1px solid var(--border); border-radius: 12px;
+        padding: 0.4rem 0.6rem; font-size: 0.78rem; max-width: 220px;
+    }
+    .attach-chip img { width: 28px; height: 28px; border-radius: 6px; object-fit: cover; flex-shrink: 0; }
+    .attach-chip .attach-meta { overflow: hidden; }
+    .attach-chip .attach-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+    .attach-chip .attach-size { color: var(--text-secondary); font-size: 0.68rem; }
+    .attach-chip .attach-remove { background: none; border: none; color: var(--text-secondary); cursor: pointer; flex-shrink: 0; display: flex; }
+    .attach-chip .attach-remove:hover { color: var(--error); }
+
+    /* ---- Generated / attached images inside a message ---- */
+    .msg-image { max-width: 100%; border-radius: 14px; margin-top: 0.5rem; display: block; border: 1px solid var(--border); }
+    .msg-image-wrap { position: relative; }
+    .msg-file-note { display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.4rem; opacity: 0.85; }
+
+    /* ---- Grounding / web-search sources ---- */
+    .msg-sources { margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed var(--border); display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    .msg-source-chip { font-size: 0.7rem; color: var(--info); background: rgba(56,189,248,0.1); border-radius: 999px; padding: 0.2rem 0.6rem; text-decoration: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .msg-content h1, .msg-content h2, .msg-content h3 { margin: 0.6rem 0 0.4rem; line-height: 1.4; }
+    .msg-content h1 { font-size: 1.25rem; } .msg-content h2 { font-size: 1.12rem; } .msg-content h3 { font-size: 1.02rem; }
+    .msg-content ol { list-style: decimal; padding-right: 1.25rem; }
+    .msg-content blockquote { border-inline-start: 3px solid var(--primary-light); padding-inline-start: 0.8rem; color: var(--text-secondary); margin: 0.5rem 0; }
+    .msg-content table { border-collapse: collapse; width: 100%; margin: 0.6rem 0; font-size: 0.85rem; }
+    .msg-content th, .msg-content td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: start; }
+
+    /* ---- Language selector ---- */
+    .lang-flag { font-size: 1rem; }
+
+    .menu-toggle {
+        display: none; width: 42px; height: 42px; background: var(--surface);
+        border: 1px solid var(--border); border-radius: 12px; color: var(--text);
+        align-items: center; justify-content: center; cursor: pointer; transition: all var(--transition-med);
+        flex-shrink: 0;
+    }
+    .menu-toggle:hover { background: rgba(99, 102, 241, 0.1); border-color: var(--primary-light); }
+
+    .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 150; }
+    .overlay.show { display: block; }
+
+    .code-header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 1rem; background: rgba(99, 102, 241, 0.1); border-radius: 12px 12px 0 0; border-bottom: 1px solid var(--border); margin: -1rem -1rem 0.5rem -1rem; width: calc(100% + 2rem); }
+    .code-lang { font-size: 0.75rem; color: var(--primary-glow); font-weight: 600; }
+    .copy-btn { background: rgba(99, 102, 241, 0.2); border: 1px solid var(--border); color: var(--text-secondary); padding: 0.25rem 0.75rem; border-radius: 6px; font-size: 0.75rem; cursor: pointer; transition: all var(--transition-fast); font-family: inherit; }
+    .copy-btn:hover { background: rgba(99, 102, 241, 0.3); color: var(--text); }
+    .copy-btn.copied { background: var(--success); color: white; }
+
+    .msg-actions { display: flex; gap: 0.4rem; margin-top: 0.6rem; flex-wrap: wrap; }
+    .msg-action-btn { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); padding: 0.3rem 0.7rem; border-radius: 8px; font-size: 0.72rem; cursor: pointer; transition: all var(--transition-fast); font-family: inherit; display: inline-flex; align-items: center; gap: 0.3rem; }
+    .msg-action-btn:hover { background: rgba(99, 102, 241, 0.15); color: var(--text); }
+    .msg-action-btn.copied { background: var(--success); color: #fff; border-color: transparent; }
+    .stream-cursor { display: inline-block; margin-inline-start: 2px; color: var(--primary-light); animation: streamBlink 1s step-start infinite; }
+    @keyframes streamBlink { 50% { opacity: 0; } }
+
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>
+</head>
+<body>
+<div class="bg-animation"></div>
+<div class="stars" id="stars"></div>
+<div class="overlay" id="overlay" onclick="UI.closeSidebar()"></div>
+
+<!-- ===================== AUTH ===================== -->
+<div class="auth-container" id="loginPage">
+    <div class="auth-box">
+        <div class="auth-logo">
+            <div class="auth-logo-icon">A</div>
+            <h1>abdelrezakbezzag</h1>
+            <p>تسجيل الدخول إلى مساحة الذكاء الاصطناعي الخاصة بك</p>
+        </div>
+        <form onsubmit="Auth.handleLogin(event)" novalidate>
+            <div class="form-group" id="loginEmailGroup">
+                <label for="loginEmail">البريد الإلكتروني</label>
+                <input type="email" class="form-input" placeholder="example@email.com" required id="loginEmail" autocomplete="email">
+                <div class="field-error">يرجى إدخال بريد إلكتروني صحيح</div>
+            </div>
+            <div class="form-group" id="loginPasswordGroup">
+                <label for="loginPassword">كلمة المرور</label>
+                <input type="password" class="form-input" placeholder="••••••••" required id="loginPassword" autocomplete="current-password">
+                <div class="field-error">كلمة المرور مطلوبة</div>
+            </div>
+            <button type="submit" class="btn" id="loginSubmitBtn">تسجيل الدخول</button>
+        </form>
+        <button class="btn btn-secondary" onclick="Auth.showRegister()">إنشاء حساب جديد</button>
+        <div class="or-divider" id="i18n-or-login">أو</div>
+        <div id="googleBtnLogin"></div>
+        <p class="form-hint" id="googleNotConfiguredHintLogin" style="display:none;text-align:center;margin-top:0.75rem">
+            تسجيل الدخول عبر Google غير مفعّل بعد على هذا الموقع (لم يُضبط Client ID).
+        </p>
+        <p class="form-hint" style="text-align:center;margin-top:1.25rem">
+            بياناتك تُخزَّن محلياً في متصفحك فقط ومشفّرة داخل هذا الجهاز — لا يوجد خادم خارجي لهذا التطبيق.
+        </p>
+    </div>
+</div>
+
+<div class="auth-container" id="registerPage" style="display:none">
+    <div class="auth-box">
+        <div class="auth-logo">
+            <div class="auth-logo-icon">A</div>
+            <h1>abdelrezakbezzag</h1>
+            <p>أنشئ حسابك وابدأ رحلتك مع الذكاء الاصطناعي</p>
+        </div>
+        <form onsubmit="Auth.handleRegister(event)" novalidate>
+            <div class="form-group" id="regNameGroup">
+                <label for="regName">الاسم الكامل</label>
+                <input type="text" class="form-input" placeholder="محمد أحمد" required id="regName" autocomplete="name">
+                <div class="field-error">يرجى إدخال اسمك</div>
+            </div>
+            <div class="form-group" id="regEmailGroup">
+                <label for="regEmail">البريد الإلكتروني</label>
+                <input type="email" class="form-input" placeholder="example@email.com" required id="regEmail" autocomplete="email">
+                <div class="field-error">يرجى إدخال بريد إلكتروني صحيح</div>
+            </div>
+            <div class="form-group" id="regPasswordGroup">
+                <label for="regPassword">كلمة المرور</label>
+                <input type="password" class="form-input" placeholder="••••••••" required id="regPassword" autocomplete="new-password" minlength="6">
+                <div class="field-error">6 أحرف على الأقل</div>
+            </div>
+            <button type="submit" class="btn" id="registerSubmitBtn">إنشاء الحساب</button>
+        </form>
+        <div class="or-divider">أو</div>
+        <div id="googleBtnRegister"></div>
+        <p class="form-hint" id="googleNotConfiguredHintRegister" style="display:none;text-align:center;margin-top:0.75rem">
+            التسجيل عبر Google غير مفعّل بعد على هذا الموقع (لم يُضبط Client ID).
+        </p>
+        <div class="auth-footer">لديك حساب بالفعل؟ <a onclick="Auth.showLogin()">تسجيل الدخول</a></div>
+    </div>
+</div>
+
+<!-- ===================== APP ===================== -->
+<div class="app" id="app">
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo-icon">A</div>
+            <h2>abdelrezakbezzag</h2>
+        </div>
+        <button class="new-chat-btn" onclick="ChatManager.newChat()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span data-i18n="sidebar.newChat">محادثة جديدة</span>
+        </button>
+        <div class="search-box" id="searchBox">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="historySearch" data-i18n-ph="sidebar.search" placeholder="ابحث في المحادثات... (Ctrl+K)" oninput="ChatManager.onSearchInput(this.value)">
+            <button class="clear-search" onclick="ChatManager.clearSearch()" aria-label="مسح البحث">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <div class="chat-history" id="chatHistory"></div>
+        <div class="sidebar-footer">
+            <div class="sidebar-tools">
+                <button class="icon-btn" onclick="Dashboard.open()" title="لوحة التحليلات" aria-label="لوحة التحليلات" data-i18n-title="sidebar.dashboard">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg>
+                </button>
+                <button class="icon-btn" onclick="SettingsPanel.open()" title="الإعدادات (Ctrl+,)" aria-label="الإعدادات" data-i18n-title="sidebar.settings">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                </button>
+                <button class="icon-btn" onclick="Shortcuts.open()" title="اختصارات لوحة المفاتيح (؟)" aria-label="الاختصارات" data-i18n-title="sidebar.shortcuts">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                </button>
+            </div>
+            <div class="user-info" onclick="Auth.logout()" title="تسجيل الخروج">
+                <div class="user-avatar" id="userAvatar">A</div>
+                <div class="user-details">
+                    <h4 id="userName">المستخدم</h4>
+                    <p data-i18n="sidebar.logout">تسجيل الخروج</p>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <button class="menu-toggle" id="menuToggle" onclick="UI.toggleSidebar()" aria-label="القائمة">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                </button>
+                <div class="model-selector" onclick="ChatManager.cycleModel()" title="تبديل النموذج">
+                    <span class="dot" id="modelDot"></span>
+                    <span id="modelName" data-i18n="topbar.modelFast">المساعد السريع</span>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <button class="icon-btn install-btn" id="installBtn" onclick="PWA.promptInstall()" title="تثبيت التطبيق">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    <span data-i18n="topbar.install">تثبيت</span>
+                </button>
+                <button class="icon-btn" onclick="Theme.toggle()" title="تبديل المظهر (فاتح/داكن)" aria-label="تبديل المظهر" data-i18n-title="topbar.theme">
+                    <svg class="theme-icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+                    <svg class="theme-icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="chat-area" id="chatArea">
+            <div class="welcome" id="welcome">
+                <h1 data-i18n="welcome.title">مرحباً بك في abdelrezakbezzag</h1>
+                <p data-i18n="welcome.subtitle">مساعدك الذكي الشخصي. اسألني أي شيء -- برمجة، كتابة، تحليل، ترجمة، أو حتى مجرد حوار.</p>
+                <div class="suggestion-grid">
+                    <div class="suggestion-card" onclick="ChatManager.sendQuick('اكتب لي كود بايثون لحساب فيبوناتشي')">
+                        <h4 data-i18n="suggestions.py.title">🐍 كود بايثون</h4><p data-i18n="suggestions.py.desc">اكتب كود فيبوناتشي</p>
+                    </div>
+                    <div class="suggestion-card" onclick="ChatManager.sendQuick('اشرح لي مفهوم التعلم العميق بشكل مبسط')">
+                        <h4 data-i18n="suggestions.dl.title">🧠 تعلم عميق</h4><p data-i18n="suggestions.dl.desc">شرح مبسط للتعلم العميق</p>
+                    </div>
+                    <div class="suggestion-card" onclick="ChatManager.sendQuick('اكتب لي قصيدة حب باللغة العربية الفصحى')">
+                        <h4 data-i18n="suggestions.poem.title">✍️ قصيدة عربية</h4><p data-i18n="suggestions.poem.desc">قصيدة فصحى جميلة</p>
+                    </div>
+                    <div class="suggestion-card" onclick="ChatManager.sendQuick('ترجم هذا إلى الإنجليزية: السلام عليكم ورحمة الله')">
+                        <h4 data-i18n="suggestions.translate.title">🌐 ترجمة</h4><p data-i18n="suggestions.translate.desc">ترجمة نصوص فورية</p>
+                    </div>
+                </div>
+            </div>
+            <div class="messages" id="messages" style="display:none"></div>
+        </div>
+
+        <div class="input-container">
+            <p class="input-hint" id="inputHint"></p>
+            <div class="input-toolbar">
+                <button class="tool-toggle" onclick="FileAttach.pickFile()" title="إرفاق ملف أو صورة" type="button">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                    <span>إرفاق ملف</span>
+                </button>
+                <input type="file" id="chatFileInput" style="display:none" multiple onchange="FileAttach.onFilesPicked(this.files)">
+                <button class="tool-toggle" id="webSearchToggle" onclick="ChatManager.toggleWebSearch()" title="السماح للذكاء الاصطناعي بالبحث في الويب قبل الإجابة" type="button">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                    <span>البحث في الويب</span>
+                </button>
+                <button class="tool-toggle" id="imageModeToggle" onclick="ChatManager.toggleImageMode()" title="توليد صورة بالذكاء الاصطناعي بدل الرد النصي" type="button">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="M21 15l-5-5L5 21"></path></svg>
+                    <span>توليد صورة</span>
+                </button>
+            </div>
+            <div class="attach-list" id="attachList"></div>
+            <div class="input-box">
+                <textarea id="userInput" data-i18n-ph="input.placeholder" placeholder="اكتب رسالتك هنا..." rows="1" onkeydown="ChatManager.handleKey(event)" oninput="UI.autoResize(this)"></textarea>
+                <button class="send-icon" id="sendBtn" onclick="ChatManager.handleSendBtnClick()" aria-label="إرسال">
+                    <span id="sendBtnIcon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                    </span>
+                </button>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- ===================== SETTINGS MODAL ===================== -->
+<div class="modal-overlay" id="settingsModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h3><span data-i18n="settings.title">⚙️ الإعدادات</span></h3>
+            <button class="modal-close" onclick="SettingsPanel.close()" aria-label="إغلاق"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+        <div class="modal-body">
+            <div class="settings-section">
+                <h4 data-i18n="settings.theme.title">المظهر</h4>
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-row-label" data-i18n="settings.theme.label">وضع الألوان</div>
+                        <div class="settings-row-desc">تلقائي يتبع إعداد نظام التشغيل لديك</div>
+                    </div>
+                    <div class="segmented" id="themeSegment">
+                        <button data-theme-mode="light" onclick="Theme.setMode('light')" data-i18n="settings.theme.light">فاتح</button>
+                        <button data-theme-mode="dark" onclick="Theme.setMode('dark')" data-i18n="settings.theme.dark">داكن</button>
+                        <button data-theme-mode="auto" onclick="Theme.setMode('auto')" data-i18n="settings.theme.auto">تلقائي</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h4 data-i18n="settings.language.title">اللغة</h4>
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-row-label" data-i18n="settings.language.label">لغة الواجهة</div>
+                        <div class="settings-row-desc" data-i18n="settings.language.desc">تُطبَّق فوراً وتُحفظ لزياراتك القادمة</div>
+                    </div>
+                    <div class="segmented" id="langSegment">
+                        <button data-lang="ar" onclick="I18n.setLang('ar')"><span class="lang-flag">🇸🇦</span> العربية</button>
+                        <button data-lang="en" onclick="I18n.setLang('en')"><span class="lang-flag">🇬🇧</span> English</button>
+                        <button data-lang="fr" onclick="I18n.setLang('fr')"><span class="lang-flag">🇫🇷</span> Français</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h4 data-i18n="settings.google.title">تسجيل الدخول بواسطة Google</h4>
+                <div class="settings-row-desc" style="margin-bottom:0.7rem" data-i18n="settings.google.desc">
+                    لتفعيل زر "الدخول عبر Google"، أنشئ معرّف عميل OAuth من
+                    <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" style="color:var(--primary-glow);font-weight:700">Google Cloud Console</a>
+                    والصقه هنا. يبقى محفوظاً محلياً فقط ولا تحتاجه إن كنت تستخدم البريد وكلمة المرور.
+                </div>
+                <div class="api-key-row">
+                    <input type="text" class="form-input" id="googleClientIdInput" placeholder="xxxxxxxx.apps.googleusercontent.com">
+                </div>
+                <div style="display:flex;gap:0.6rem;margin-top:0.7rem">
+                    <button class="btn btn-sm" style="width:auto" onclick="SettingsPanel.saveGoogleClientId()" data-i18n="settings.save">حفظ</button>
+                    <span id="googleClientIdStatus"></span>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h4 data-i18n="settings.tools.title">أدوات المحادثة</h4>
+                <div class="settings-row-desc">
+                    ميزتا "البحث في الويب" و"توليد صورة" تعملان تلقائياً عبر خادم التطبيق (OpenRouter) — لا حاجة لأي مفتاح على هذا الجهاز. توليد الصور يتطلّب اختيار معرّف نموذج يدعم إخراج الصور على OpenRouter.
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h4 data-i18n="settings.api.title">الاتصال بمزوّد الذكاء الاصطناعي</h4>
+                <div class="settings-row-desc" style="margin-bottom:0.7rem">
+                    مفتاح الـ API لم يعد يُدخَل هنا مطلقاً. هذا الإصدار يمر عبر خادم وسيط (proxy) خاص بمالك الموقع، والمفتاح محفوظ هناك فقط ولا يصل أبداً إلى متصفحك — وهذه هي الطريقة الوحيدة لإخفائه فعلاً.
+                </div>
+                <details style="margin-top:0.9rem">
+                    <summary style="cursor:pointer;font-size:0.8rem;color:var(--text-secondary);font-weight:600">إعدادات متقدمة: أسماء النماذج</summary>
+                    <div style="margin-top:0.7rem;display:grid;gap:0.6rem">
+                        <div>
+                            <label class="form-hint" for="modelFastInput">معرّف النموذج السريع</label>
+                            <input type="text" class="form-input" id="modelFastInput" style="margin-top:0.3rem">
+                        </div>
+                        <div>
+                            <label class="form-hint" for="modelProInput">معرّف النموذج المتقدم</label>
+                            <input type="text" class="form-input" id="modelProInput" style="margin-top:0.3rem">
+                        </div>
+                        <div>
+                            <label class="form-hint" for="modelImageInput">معرّف نموذج توليد الصور</label>
+                            <input type="text" class="form-input" id="modelImageInput" style="margin-top:0.3rem">
+                        </div>
+                        <button class="btn btn-ghost btn-sm" onclick="SettingsPanel.saveModelIds()">حفظ المعرّفات</button>
+                        <p class="form-hint">مزوّدو النماذج يغيّرون معرّفات إصداراتهم بين الحين والآخر؛ إن ظهر خطأ "النموذج غير موجود" حدّث المعرّف هنا دون الحاجة لتعديل الكود.</p>
+                    </div>
+                </details>
+            </div>
+
+            <div class="settings-section">
+                <h4 data-i18n="settings.data.title">البيانات</h4>
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-row-label">تصدير المحادثات (JSON)</div>
+                        <div class="settings-row-desc">نسخة كاملة يمكن استيرادها لاحقاً</div>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" onclick="DataIO.exportJSON()" data-i18n="settings.data.exportBtn">تصدير</button>
+                </div>
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-row-label">تصدير المحادثات (CSV)</div>
+                        <div class="settings-row-desc">جدول مسطّح لفتحه في إكسل</div>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" onclick="DataIO.exportCSV()" data-i18n="settings.data.exportBtn">تصدير</button>
+                </div>
+                <div style="margin-top:0.9rem">
+                    <div class="settings-row-label" style="margin-bottom:0.5rem">استيراد محادثات (JSON)</div>
+                    <div class="drop-zone" id="importDrop" onclick="document.getElementById('importFileInput').click()">
+                        اسحب ملف JSON هنا أو انقر للاختيار
+                        <input type="file" id="importFileInput" accept="application/json" style="display:none" onchange="DataIO.handleImportFile(this.files)">
+                    </div>
+                </div>
+                <div class="settings-row" style="margin-top:1rem">
+                    <div>
+                        <div class="settings-row-label" style="color:var(--error)">حذف كل البيانات</div>
+                        <div class="settings-row-desc">يحذف المحادثات، المفتاح، والحساب من هذا الجهاز نهائياً</div>
+                    </div>
+                    <button class="btn btn-danger btn-sm" style="width:auto" onclick="Confirm.ask('حذف كل البيانات؟','لا يمكن التراجع عن هذا الإجراء. سيتم حذف جميع محادثاتك وإعداداتك من هذا الجهاز.', ()=>DataIO.wipeAll())">حذف</button>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h4 data-i18n="settings.about.title">حول التطبيق</h4>
+                <div class="settings-row-desc">
+                    الإصدار 2.1.0 &middot; تم التطوير بواسطة <strong id="devNameLabel">Abdelrezak Bezzag</strong>
+                </div>
+                <div class="settings-row" style="margin-top:0.9rem">
+                    <div>
+                        <div class="settings-row-label">سياسة الخصوصية</div>
+                        <div class="settings-row-desc">ما الذي يجمعه التطبيق وكيف يُستخدم</div>
+                    </div>
+                    <a class="btn btn-ghost btn-sm" style="width:auto;text-decoration:none;display:inline-flex;align-items:center;justify-content:center" href="./privacy.html" target="_blank" rel="noopener">فتح</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===================== DASHBOARD MODAL ===================== -->
+<div class="modal-overlay" id="dashboardModal">
+    <div class="modal modal-wide">
+        <div class="modal-header">
+            <h3><span data-i18n="dashboard.title">📊 لوحة التحليلات</span></h3>
+            <button class="modal-close" onclick="Dashboard.close()" aria-label="إغلاق"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+        <div class="modal-body" id="dashboardBody">
+            <!-- populated by Dashboard.render() -->
+        </div>
+    </div>
+</div>
+
+<!-- ===================== SHORTCUTS MODAL ===================== -->
+<div class="modal-overlay" id="shortcutsModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h3><span data-i18n="shortcuts.title">⌨️ اختصارات لوحة المفاتيح</span></h3>
+            <button class="modal-close" onclick="Shortcuts.close()" aria-label="إغلاق"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+        </div>
+        <div class="modal-body">
+            <div class="shortcut-row"><span>محادثة جديدة</span><span class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">N</span></span></div>
+            <div class="shortcut-row"><span>البحث في المحادثات</span><span class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">K</span></span></div>
+            <div class="shortcut-row"><span>فتح الإعدادات</span><span class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">,</span></span></div>
+            <div class="shortcut-row"><span>لوحة التحليلات</span><span class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">D</span></span></div>
+            <div class="shortcut-row"><span>تصدير المحادثات</span><span class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">E</span></span></div>
+            <div class="shortcut-row"><span>تبديل المظهر</span><span class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">J</span></span></div>
+            <div class="shortcut-row"><span>إرسال الرسالة</span><span class="shortcut-keys"><span class="kbd">Enter</span></span></div>
+            <div class="shortcut-row"><span>سطر جديد في الرسالة</span><span class="shortcut-keys"><span class="kbd">Shift</span><span class="kbd">Enter</span></span></div>
+            <div class="shortcut-row"><span>إغلاق أي نافذة</span><span class="shortcut-keys"><span class="kbd">Esc</span></span></div>
+            <div class="shortcut-row"><span>هذه القائمة</span><span class="shortcut-keys"><span class="kbd">؟</span></span></div>
+        </div>
+    </div>
+</div>
+
+<!-- ===================== CONFIRM MODAL ===================== -->
+<div class="modal-overlay" id="confirmModal">
+    <div class="modal confirm-modal" style="max-width:420px">
+        <div class="modal-body">
+            <div class="confirm-icon">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+            </div>
+            <h3 id="confirmTitle" style="margin-bottom:0.6rem">تأكيد</h3>
+            <p id="confirmMessage" style="color:var(--text-secondary);font-size:0.9rem;line-height:1.7"></p>
+        </div>
+        <div class="modal-footer" style="justify-content:center">
+            <button class="btn btn-ghost" onclick="Confirm.cancel()">إلغاء</button>
+            <button class="btn btn-danger" style="width:auto;padding:0.75rem 1.5rem" onclick="Confirm.accept()" id="confirmAcceptBtn">تأكيد</button>
+        </div>
+    </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+'use strict';
+/* ============================================================================
+   abdelrezakbezzag — Application Script
+   Created by Abdelrezak Bezzag
+   ============================================================================ */
+
+/* ---------------------------------------------------------------------------
+ * 0. DEVELOPER IDENTITY
+ * ------------------------------------------------------------------------- */
+const DEVELOPER_INFO = 'Developed by Abdelrezak Bezzag (abdelrekbezzag)';
+window.getDeveloperInfo = function () { return DEVELOPER_INFO; };
+Object.defineProperty(window, 'developer', { get() { return DEVELOPER_INFO; } });
+
+(function printBanner() {
+    const style1 = 'font-size:20px;font-weight:900;color:#818cf8;';
+    const style2 = 'font-size:12px;color:#94a3b8;';
+    try {
+        console.log('%cabdelrezakbezzag', style1);
+        console.log('%c' + DEVELOPER_INFO, style2);
+    } catch (e) { /* console may be unavailable in rare embedded contexts */ }
+})();
+
+/* ---------------------------------------------------------------------------
+ * 0.1 AI PROXY CONFIG
+ * ----------------------------------------------------------------------------
+ * الموقع مرفوع على Vercel مع الملف نفسه، والـ Function الوحيدة
+ * (api/generateTextOpenRouter.js) فـ نفس المشروع — فهذا خلّي الرابط فارغ ''
+ * كافي، لأن الطلبات تمشي لنفس الدومين مباشرة (/api/generateTextOpenRouter).
+ * المفتاح الحقيقي ماكاش هنا، هو محفوظ فقط فـ Vercel Environment Variables
+ * باسم OPENROUTER_API_KEY (مفتاحك من openrouter.ai، وليس هنا أبداً).
+ *
+ * مزوّد واحد فقط (OpenRouter): كل الطلبات — دردشة، بث مباشر، بحث في الويب،
+ * وتوليد الصور — تمرّ عبر نفس الـ Function، وتختار فقط "معرّف النموذج"
+ * (model id) من إعدادات التطبيق. النماذج الافتراضية:
+ * "deepseek/deepseek-chat:free" (سريع) و"deepseek/deepseek-r1:free" (متقدم)
+ * — كلاهما مجاني على OpenRouter، ويمكن تغييرهما لأي نموذج آخر متوفر هناك
+ * من نفس صفحة الإعدادات، دون لمس الكود.
+ *
+ * ⚠️ تنبيه أمان: أي مفتاح API تكتبه مباشرة داخل كود JavaScript فـ المتصفح
+ * أو تحطّه فـ ملف كيتّرفع لـ GitHub يصير مكشوفاً لأي شخص يشوف الكود —
+ * حتى لو الـ repo خاص، أو لو غادي يولّي عام يوماً من الأيام. GitHub
+ * نفسه كيسكان المفاتيح المعروفة وكيبلّغ عليها. أي مفتاح كتبتيه فـ محادثة
+ * سابقة يُعتبر مكشوفاً بمجرد ما كتبتيه، حتى لو ماستعملتوش — روح ألغيه
+ * (revoke) من لوحة تحكم OpenRouter وأنشئ مفتاحاً جديداً، وحطّه غير فـ
+ * Environment Variables (Vercel محلياً وفـ الإنتاج)، عمرك متكتبو فـ ملف
+ * كيدخل لـ git.
+ *
+ * الموثوقية بدون سلسلة مزوّدين: الطلب يحاول البث المباشر أولاً، وإذا فشل
+ * بخطأ قابل لإعادة المحاولة (429 أو 5xx) يعاود المحاولة على نفس الخادم
+ * مرتين بفاصل قصير قبل ما يظهر خطأ للمستخدم — شوف _withRetry() فتحت.
+ * ------------------------------------------------------------------------- */
+const AI_PROXY_URL = '';
+
+/* ---------------------------------------------------------------------------
+ * 1. GLOBAL ERROR BOUNDARY
+ * ------------------------------------------------------------------------- */
+const ErrorBoundary = {
+    init() {
+        window.addEventListener('error', (event) => {
+            console.error('[ErrorBoundary] Uncaught error:', event.error || event.message);
+            Toast.show('حدث خطأ غير متوقع في التطبيق. حاول تحديث الصفحة إن استمرت المشكلة.', 'error');
+        });
+        window.addEventListener('unhandledrejection', (event) => {
+            console.error('[ErrorBoundary] Unhandled promise rejection:', event.reason);
+            Toast.show('تعذّر إتمام إحدى العمليات في الخلفية.', 'error');
+        });
+    },
+    async wrap(fn, friendlyMessage) {
+        try {
+            return await fn();
+        } catch (err) {
+            console.error(err);
+            Toast.show(friendlyMessage || 'حدث خطأ غير متوقع.', 'error');
+            return null;
+        }
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 2. TINY STATE MANAGEMENT (pub/sub store)
+ * ------------------------------------------------------------------------- */
+class Store {
+    constructor(initialState) {
+        this.state = { ...initialState };
+        this.listeners = new Set();
+    }
+    getState() { return this.state; }
+    setState(partial) {
+        const next = typeof partial === 'function' ? partial(this.state) : partial;
+        this.state = { ...this.state, ...next };
+        this.listeners.forEach((fn) => {
+            try { fn(this.state); } catch (e) { console.error('[Store] listener error', e); }
+        });
+    }
+    subscribe(fn) {
+        this.listeners.add(fn);
+        return () => this.listeners.delete(fn);
+    }
+}
+
+const AppStore = new Store({
+    user: null,
+    chats: [],
+    currentChatId: null,
+    isLoading: false,
+    model: 'flash',
+    themeMode: 'auto',   // 'auto' | 'light' | 'dark'
+    searchQuery: '',
+    webSearchOn: false,
+    imageModeOn: false
+});
+
+/* ---------------------------------------------------------------------------
+ * 2b. I18N — interface language (Arabic / English / French)
+ *     Only the static app chrome is translated here; chat replies come back
+ *     in whatever language the model + user use, same as any AI chat app.
+ * ------------------------------------------------------------------------- */
+const I18n = {
+    current: 'ar',
+    dict: {
+        ar: {
+            'sidebar.newChat': 'محادثة جديدة', 'sidebar.search': 'ابحث في المحادثات... (Ctrl+K)',
+            'sidebar.dashboard': 'لوحة التحليلات', 'sidebar.settings': 'الإعدادات (Ctrl+,)',
+            'sidebar.shortcuts': 'اختصارات لوحة المفاتيح (؟)', 'sidebar.logout': 'تسجيل الخروج',
+            'topbar.modelFast': 'المساعد السريع', 'topbar.modelPro': 'المساعد المتقدم',
+            'topbar.install': 'تثبيت', 'topbar.theme': 'تبديل المظهر (فاتح/داكن)',
+            'welcome.title': 'مرحباً بك في abdelrezakbezzag',
+            'welcome.subtitle': 'مساعدك الذكي الشخصي. اسألني أي شيء -- برمجة، كتابة، تحليل، ترجمة، أو حتى مجرد حوار.',
+            'suggestions.py.title': '🐍 كود بايثون', 'suggestions.py.desc': 'اكتب كود فيبوناتشي',
+            'suggestions.dl.title': '🧠 تعلم عميق', 'suggestions.dl.desc': 'شرح مبسط للتعلم العميق',
+            'suggestions.poem.title': '✍️ قصيدة عربية', 'suggestions.poem.desc': 'قصيدة فصحى جميلة',
+            'suggestions.translate.title': '🌐 ترجمة', 'suggestions.translate.desc': 'ترجمة نصوص فورية',
+            'input.placeholder': 'اكتب رسالتك هنا...',
+            'toolbar.attach': 'إرفاق ملف', 'toolbar.search': 'البحث في الويب', 'toolbar.image': 'توليد صورة',
+            'settings.title': '⚙️ الإعدادات', 'settings.save': 'حفظ',
+            'settings.theme.title': 'المظهر', 'settings.theme.label': 'وضع الألوان',
+            'settings.theme.light': 'فاتح', 'settings.theme.dark': 'داكن', 'settings.theme.auto': 'تلقائي',
+            'settings.language.title': 'اللغة', 'settings.language.label': 'لغة الواجهة',
+            'settings.language.desc': 'تُطبَّق فوراً وتُحفظ لزياراتك القادمة',
+            'settings.google.title': 'تسجيل الدخول بواسطة Google',
+            'settings.google.desc': 'لتفعيل زر "الدخول عبر Google"، أنشئ معرّف عميل OAuth من Google Cloud Console والصقه هنا. يبقى محفوظاً محلياً فقط.',
+            'settings.tools.title': 'أدوات المحادثة',
+            'settings.api.title': 'مفتاح واجهة برمجة التطبيقات (API)',
+            'settings.data.title': 'البيانات', 'settings.data.exportBtn': 'تصدير',
+            'settings.about.title': 'حول التطبيق',
+            'dashboard.title': '📊 لوحة التحليلات', 'shortcuts.title': '⌨️ اختصارات لوحة المفاتيح',
+            'google.loginBtn': 'تسجيل الدخول عبر Google', 'google.or': 'أو'
+        },
+        en: {
+            'sidebar.newChat': 'New chat', 'sidebar.search': 'Search chats... (Ctrl+K)',
+            'sidebar.dashboard': 'Analytics', 'sidebar.settings': 'Settings (Ctrl+,)',
+            'sidebar.shortcuts': 'Keyboard shortcuts (?)', 'sidebar.logout': 'Log out',
+            'topbar.modelFast': 'Fast assistant', 'topbar.modelPro': 'Advanced assistant',
+            'topbar.install': 'Install', 'topbar.theme': 'Toggle theme (light/dark)',
+            'welcome.title': 'Welcome to abdelrezakbezzag',
+            'welcome.subtitle': 'Your personal AI assistant. Ask me anything -- code, writing, analysis, translation, or just a chat.',
+            'suggestions.py.title': '🐍 Python code', 'suggestions.py.desc': 'Write Fibonacci code',
+            'suggestions.dl.title': '🧠 Deep learning', 'suggestions.dl.desc': 'A simple explanation of deep learning',
+            'suggestions.poem.title': '✍️ Arabic poem', 'suggestions.poem.desc': 'A beautiful classical Arabic poem',
+            'suggestions.translate.title': '🌐 Translate', 'suggestions.translate.desc': 'Instant text translation',
+            'input.placeholder': 'Type your message...',
+            'toolbar.attach': 'Attach file', 'toolbar.search': 'Web search', 'toolbar.image': 'Generate image',
+            'settings.title': '⚙️ Settings', 'settings.save': 'Save',
+            'settings.theme.title': 'Appearance', 'settings.theme.label': 'Color mode',
+            'settings.theme.light': 'Light', 'settings.theme.dark': 'Dark', 'settings.theme.auto': 'Auto',
+            'settings.language.title': 'Language', 'settings.language.label': 'Interface language',
+            'settings.language.desc': 'Applied instantly and remembered next time',
+            'settings.google.title': 'Sign in with Google',
+            'settings.google.desc': 'To enable the "Sign in with Google" button, create an OAuth client ID in Google Cloud Console and paste it here. Stored locally only.',
+            'settings.tools.title': 'Chat tools',
+            'settings.api.title': 'API key',
+            'settings.data.title': 'Data', 'settings.data.exportBtn': 'Export',
+            'settings.about.title': 'About',
+            'dashboard.title': '📊 Analytics', 'shortcuts.title': '⌨️ Keyboard shortcuts',
+            'google.loginBtn': 'Sign in with Google', 'google.or': 'or'
+        },
+        fr: {
+            'sidebar.newChat': 'Nouvelle discussion', 'sidebar.search': 'Rechercher... (Ctrl+K)',
+            'sidebar.dashboard': 'Statistiques', 'sidebar.settings': 'Paramètres (Ctrl+,)',
+            'sidebar.shortcuts': 'Raccourcis clavier (?)', 'sidebar.logout': 'Déconnexion',
+            'topbar.modelFast': 'Assistant rapide', 'topbar.modelPro': 'Assistant avancé',
+            'topbar.install': 'Installer', 'topbar.theme': 'Changer le thème (clair/sombre)',
+            'welcome.title': 'Bienvenue sur abdelrezakbezzag',
+            'welcome.subtitle': 'Votre assistant IA personnel. Demandez-moi n\'importe quoi -- code, écriture, analyse, traduction, ou juste discuter.',
+            'suggestions.py.title': '🐍 Code Python', 'suggestions.py.desc': 'Écrire le code de Fibonacci',
+            'suggestions.dl.title': '🧠 Deep learning', 'suggestions.dl.desc': 'Une explication simple du deep learning',
+            'suggestions.poem.title': '✍️ Poème arabe', 'suggestions.poem.desc': 'Un beau poème en arabe classique',
+            'suggestions.translate.title': '🌐 Traduire', 'suggestions.translate.desc': 'Traduction instantanée',
+            'input.placeholder': 'Écrivez votre message...',
+            'toolbar.attach': 'Joindre un fichier', 'toolbar.search': 'Recherche web', 'toolbar.image': 'Générer une image',
+            'settings.title': '⚙️ Paramètres', 'settings.save': 'Enregistrer',
+            'settings.theme.title': 'Apparence', 'settings.theme.label': 'Mode de couleur',
+            'settings.theme.light': 'Clair', 'settings.theme.dark': 'Sombre', 'settings.theme.auto': 'Auto',
+            'settings.language.title': 'Langue', 'settings.language.label': 'Langue de l\'interface',
+            'settings.language.desc': 'Appliquée immédiatement et mémorisée',
+            'settings.google.title': 'Se connecter avec Google',
+            'settings.google.desc': 'Pour activer le bouton Google, créez un ID client OAuth sur Google Cloud Console et collez-le ici. Stocké localement uniquement.',
+            'settings.tools.title': 'Outils de discussion',
+            'settings.api.title': 'Clé API',
+            'settings.data.title': 'Données', 'settings.data.exportBtn': 'Exporter',
+            'settings.about.title': 'À propos',
+            'dashboard.title': '📊 Statistiques', 'shortcuts.title': '⌨️ Raccourcis clavier',
+            'google.loginBtn': 'Se connecter avec Google', 'google.or': 'ou'
+        }
+    },
+
+    t(key) {
+        const table = this.dict[this.current] || this.dict.ar;
+        return table[key] || this.dict.ar[key] || key;
+    },
+
+    apply() {
+        document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = this.t(el.getAttribute('data-i18n')); });
+        document.querySelectorAll('[data-i18n-ph]').forEach((el) => { el.placeholder = this.t(el.getAttribute('data-i18n-ph')); });
+        document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+            const v = this.t(el.getAttribute('data-i18n-title'));
+            el.setAttribute('title', v); el.setAttribute('aria-label', v);
+        });
+        const state = AppStore.getState();
+        const modelKey = state.model === 'flash' ? 'topbar.modelFast' : 'topbar.modelPro';
+        const modelNameEl = document.getElementById('modelName');
+        if (modelNameEl) modelNameEl.textContent = this.t(modelKey);
+        const orLogin = document.getElementById('i18n-or-login');
+        if (orLogin) orLogin.textContent = this.t('google.or');
+        const googleLoginLabel = document.getElementById('i18n-google-login');
+        if (googleLoginLabel) googleLoginLabel.textContent = this.t('google.loginBtn');
+        document.querySelectorAll('#langSegment button').forEach((b) => b.classList.toggle('active', b.dataset.lang === this.current));
+    },
+
+    async setLang(lang) {
+        if (!this.dict[lang]) lang = 'ar';
+        this.current = lang;
+        document.documentElement.lang = lang;
+        document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+        await Vault.set('ab_lang', lang);
+        this.apply();
+    },
+
+    async init() {
+        const saved = await Vault.get('ab_lang', 'ar');
+        this.current = this.dict[saved] ? saved : 'ar';
+        document.documentElement.lang = this.current;
+        document.documentElement.dir = this.current === 'ar' ? 'rtl' : 'ltr';
+        this.apply();
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 3. CRYPTO + SECURE STORAGE VAULT
+ *    See file header comment for an honest description of what this does
+ *    and does not protect against.
+ * ------------------------------------------------------------------------- */
+const CryptoUtil = (() => {
+    const hasSubtle = !!(window.crypto && window.crypto.subtle);
+
+    function bufToB64(buf) {
+        let binary = '';
+        const bytes = new Uint8Array(buf);
+        for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+    }
+    function b64ToBuf(b64) {
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes.buffer;
+    }
+
+    async function sha256Hex(text) {
+        if (hasSubtle) {
+            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+            return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+        // Non-secure-context fallback (e.g. a plain file:// double-click).
+        // NOT cryptographically secure — only meant to avoid storing raw plaintext.
+        let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text.charCodeAt(i);
+            h1 = Math.imul(h1 ^ ch, 2654435761);
+            h2 = Math.imul(h2 ^ ch, 1597334677);
+        }
+        h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+        h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+        return 'fb_' + (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+    }
+
+    function randomSaltHex(len = 16) {
+        if (hasSubtle) {
+            const arr = new Uint8Array(len);
+            crypto.getRandomValues(arr);
+            return Array.from(arr).map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+        let s = '';
+        for (let i = 0; i < len * 2; i++) s += Math.floor(Math.random() * 16).toString(16);
+        return s;
+    }
+
+    async function hashPassword(password, salt) {
+        return sha256Hex(salt + ':' + password + ':' + salt.split('').reverse().join(''));
+    }
+
+    let vaultKeyPromise = null;
+    async function getVaultKey() {
+        if (!hasSubtle) return null;
+        if (vaultKeyPromise) return vaultKeyPromise;
+        vaultKeyPromise = (async () => {
+            const KEY_NAME = '__ab_vault_key_v1__';
+            const existing = localStorage.getItem(KEY_NAME);
+            if (existing) {
+                try {
+                    const jwk = JSON.parse(existing);
+                    return await crypto.subtle.importKey('jwk', jwk, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+                } catch (e) {
+                    console.warn('[Vault] existing key unreadable, generating a new one', e);
+                }
+            }
+            const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+            const jwk = await crypto.subtle.exportKey('jwk', key);
+            localStorage.setItem(KEY_NAME, JSON.stringify(jwk));
+            return key;
+        })();
+        return vaultKeyPromise;
+    }
+
+    async function encrypt(value) {
+        const plaintext = JSON.stringify(value);
+        if (hasSubtle) {
+            const key = await getVaultKey();
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
+            return JSON.stringify({ v: 1, iv: bufToB64(iv), data: bufToB64(cipherBuf) });
+        }
+        // Fallback obfuscation for non-secure contexts — NOT real encryption.
+        return JSON.stringify({ v: 0, data: btoa(unescape(encodeURIComponent(plaintext))) });
+    }
+
+    async function decrypt(raw, fallback) {
+        if (!raw) return fallback;
+        try {
+            const payload = JSON.parse(raw);
+            if (payload.v === 1 && hasSubtle) {
+                const key = await getVaultKey();
+                const iv = new Uint8Array(b64ToBuf(payload.iv));
+                const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64ToBuf(payload.data));
+                return JSON.parse(new TextDecoder().decode(plainBuf));
+            }
+            if (payload.v === 0) {
+                return JSON.parse(decodeURIComponent(escape(atob(payload.data))));
+            }
+            return fallback;
+        } catch (e) {
+            console.error('[Vault] decrypt failed', e);
+            return fallback;
+        }
+    }
+
+    return { hasSubtle, sha256Hex, randomSaltHex, hashPassword, encrypt, decrypt };
+})();
+
+const Vault = {
+    async set(key, value) {
+        try {
+            const encrypted = await CryptoUtil.encrypt(value);
+            localStorage.setItem(key, encrypted);
+            return true;
+        } catch (e) {
+            console.error('[Vault.set] failed for', key, e);
+            return false;
+        }
+    },
+    async get(key, fallback = null) {
+        try {
+            const raw = localStorage.getItem(key);
+            return await CryptoUtil.decrypt(raw, fallback);
+        } catch (e) {
+            console.error('[Vault.get] failed for', key, e);
+            return fallback;
+        }
+    },
+    remove(key) { localStorage.removeItem(key); },
+    removeAllAppData() {
+        const prefixes = ['ab_'];
+        Object.keys(localStorage)
+            .filter((k) => prefixes.some((p) => k.startsWith(p)) || k === '__ab_vault_key_v1__')
+            .forEach((k) => localStorage.removeItem(k));
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 4. SANITIZATION (XSS-safe message rendering)
+ * ------------------------------------------------------------------------- */
+const Sanitize = {
+    escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    },
+    // Only allow http(s)/mailto links; block javascript:/data: etc.
+    isSafeUrl(url) {
+        try {
+            if (/^\s*(javascript|data|vbscript):/i.test(url)) return false;
+            if (/^(https?:|mailto:)/i.test(url)) return true;
+            if (/^\//.test(url) || /^#/.test(url)) return true;
+            return false;
+        } catch (e) { return false; }
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 5. TOAST NOTIFICATIONS
+ * ------------------------------------------------------------------------- */
+const Toast = {
+    icons: {
+        success: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>',
+        error: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>',
+        warning: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
+        info: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>'
+    },
+    show(message, type = 'info', duration = 3200) {
+        const container = document.getElementById('toastContainer');
+        if (!container) { console.log('[Toast]', type, message); return; }
+        const toast = document.createElement('div');
+        toast.className = 'toast ' + type;
+        toast.setAttribute('role', 'status');
+        toast.innerHTML =
+            '<span class="toast-icon">' + (this.icons[type] || this.icons.info) + '</span>' +
+            '<span class="toast-msg"></span>' +
+            '<span class="toast-progress"><i style="display:none"></i></span>';
+        toast.querySelector('.toast-msg').textContent = message;
+        const progressFill = toast.querySelector('.toast-progress');
+        progressFill.style.color = 'var(--' + (type === 'info' ? 'info' : type) + ')';
+        progressFill.querySelector('i').remove();
+        const afterEl = document.createElement('style');
+        toast.appendChild(afterEl);
+
+        const removeToast = () => {
+            toast.classList.remove('show');
+            toast.style.transform = 'translateY(10px)';
+            setTimeout(() => toast.remove(), 300);
+        };
+        toast.addEventListener('click', removeToast);
+
+        container.appendChild(toast);
+        requestAnimationFrame(() => toast.classList.add('show'));
+
+        const bar = toast.querySelector('.toast-progress');
+        bar.style.setProperty('--dur', duration + 'ms');
+        const barAfterStyle = document.createElement('style');
+        const uid = 'tp' + Math.random().toString(36).slice(2);
+        bar.classList.add(uid);
+        barAfterStyle.textContent = '.' + uid + '::after{animation-duration:' + duration + 'ms}';
+        document.head.appendChild(barAfterStyle);
+
+        const timer = setTimeout(() => { removeToast(); barAfterStyle.remove(); }, duration);
+        toast.addEventListener('click', () => clearTimeout(timer));
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 6. CONFIRM DIALOG (reusable, replaces window.confirm)
+ * ------------------------------------------------------------------------- */
+const Confirm = {
+    _onAccept: null,
+    ask(title, message, onAccept) {
+        document.getElementById('confirmTitle').textContent = title;
+        document.getElementById('confirmMessage').textContent = message;
+        this._onAccept = onAccept;
+        ModalManager.open('confirmModal');
+    },
+    accept() {
+        const fn = this._onAccept;
+        this._onAccept = null;
+        ModalManager.close('confirmModal');
+        if (typeof fn === 'function') fn();
+    },
+    cancel() {
+        this._onAccept = null;
+        ModalManager.close('confirmModal');
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 7. MODAL MANAGER
+ * ------------------------------------------------------------------------- */
+const ModalManager = {
+    stack: [],
+    open(id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.classList.add('show');
+        this.stack.push(id);
+    },
+    close(id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.classList.remove('show');
+        this.stack = this.stack.filter((x) => x !== id);
+    },
+    closeTop() {
+        if (this.stack.length === 0) return false;
+        const id = this.stack[this.stack.length - 1];
+        this.close(id);
+        return true;
+    },
+    anyOpen() { return this.stack.length > 0; }
+};
+
+document.addEventListener('click', (e) => {
+    if (e.target.classList && e.target.classList.contains('modal-overlay')) {
+        ModalManager.close(e.target.id);
+    }
+});
+
+/* ---------------------------------------------------------------------------
+ * 8. THEME (auto / light / dark)
+ * ------------------------------------------------------------------------- */
+const Theme = {
+    mediaQuery: window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null,
+    async init() {
+        const saved = await Vault.get('ab_theme_mode', 'auto');
+        AppStore.setState({ themeMode: saved });
+        this.apply();
+        if (this.mediaQuery) {
+            const handler = () => { if (AppStore.getState().themeMode === 'auto') this.apply(); };
+            if (this.mediaQuery.addEventListener) this.mediaQuery.addEventListener('change', handler);
+            else if (this.mediaQuery.addListener) this.mediaQuery.addListener(handler);
+        }
+    },
+    resolvedTheme() {
+        const mode = AppStore.getState().themeMode;
+        if (mode === 'auto') return (this.mediaQuery && this.mediaQuery.matches) ? 'light' : 'dark';
+        return mode;
+    },
+    apply() {
+        const resolved = this.resolvedTheme();
+        document.documentElement.setAttribute('data-theme', resolved);
+        const meta = document.getElementById('themeColorMeta');
+        if (meta) meta.setAttribute('content', resolved === 'light' ? '#f4f5fb' : '#0a0a1a');
+        document.querySelectorAll('#themeSegment button').forEach((btn) => {
+            btn.classList.toggle('active', btn.dataset.themeMode === AppStore.getState().themeMode);
+        });
+    },
+    async setMode(mode) {
+        AppStore.setState({ themeMode: mode });
+        this.apply();
+        await Vault.set('ab_theme_mode', mode);
+    },
+    async toggle() {
+        const current = this.resolvedTheme();
+        await this.setMode(current === 'light' ? 'dark' : 'light');
+        Toast.show(current === 'light' ? 'تم التبديل إلى الوضع الداكن' : 'تم التبديل إلى الوضع الفاتح', 'success', 1600);
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 9. AUTH
+ * ------------------------------------------------------------------------- */
+const Auth = {
+    showLogin() {
+        document.getElementById('loginPage').style.display = 'flex';
+        document.getElementById('registerPage').style.display = 'none';
+    },
+    showRegister() {
+        document.getElementById('loginPage').style.display = 'none';
+        document.getElementById('registerPage').style.display = 'flex';
+    },
+    validateEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); },
+
+    setFieldError(groupId, invalid) {
+        const group = document.getElementById(groupId);
+        if (group) group.classList.toggle('invalid', invalid);
+    },
+
+    async handleLogin(e) {
+        e.preventDefault();
+        const email = document.getElementById('loginEmail').value.trim();
+        const password = document.getElementById('loginPassword').value;
+        let valid = true;
+        if (!this.validateEmail(email)) { this.setFieldError('loginEmailGroup', true); valid = false; }
+        else this.setFieldError('loginEmailGroup', false);
+        if (!password) { this.setFieldError('loginPasswordGroup', true); valid = false; }
+        else this.setFieldError('loginPasswordGroup', false);
+        if (!valid) return;
+
+        const btn = document.getElementById('loginSubmitBtn');
+        btn.disabled = true;
+        await ErrorBoundary.wrap(async () => {
+            const users = await Vault.get('ab_users', []);
+            const user = users.find((u) => u.email === email);
+            if (!user) { Toast.show('البريد الإلكتروني أو كلمة المرور غير صحيحة', 'error'); return; }
+            const hash = await CryptoUtil.hashPassword(password, user.salt);
+            if (hash !== user.passwordHash) { Toast.show('البريد الإلكتروني أو كلمة المرور غير صحيحة', 'error'); return; }
+            const publicUser = { id: user.id, name: user.name, email: user.email };
+            AppStore.setState({ user: publicUser });
+            await Vault.set('ab_current_user', publicUser);
+            await App.enterApp();
+        }, 'تعذّر تسجيل الدخول.');
+        btn.disabled = false;
+    },
+
+    async handleRegister(e) {
+        e.preventDefault();
+        const name = document.getElementById('regName').value.trim();
+        const email = document.getElementById('regEmail').value.trim();
+        const password = document.getElementById('regPassword').value;
+        let valid = true;
+        if (!name) { this.setFieldError('regNameGroup', true); valid = false; } else this.setFieldError('regNameGroup', false);
+        if (!this.validateEmail(email)) { this.setFieldError('regEmailGroup', true); valid = false; } else this.setFieldError('regEmailGroup', false);
+        if (!password || password.length < 6) { this.setFieldError('regPasswordGroup', true); valid = false; } else this.setFieldError('regPasswordGroup', false);
+        if (!valid) return;
+
+        const btn = document.getElementById('registerSubmitBtn');
+        btn.disabled = true;
+        await ErrorBoundary.wrap(async () => {
+            let users = await Vault.get('ab_users', []);
+            if (users.find((u) => u.email === email)) {
+                Toast.show('هذا البريد مسجل بالفعل', 'error');
+                btn.disabled = false;
+                return;
+            }
+            const salt = CryptoUtil.randomSaltHex();
+            const passwordHash = await CryptoUtil.hashPassword(password, salt);
+            const newUser = { id: 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), name, email, salt, passwordHash };
+            users.push(newUser);
+            await Vault.set('ab_users', users);
+            const publicUser = { id: newUser.id, name: newUser.name, email: newUser.email };
+            AppStore.setState({ user: publicUser });
+            await Vault.set('ab_current_user', publicUser);
+            Toast.show('تم إنشاء الحساب بنجاح!', 'success');
+            await App.enterApp();
+        }, 'تعذّر إنشاء الحساب.');
+        btn.disabled = false;
+    },
+
+    async logout() {
+        AppStore.setState({ user: null, chats: [], currentChatId: null });
+        Vault.remove('ab_current_user');
+        document.getElementById('app').classList.remove('active');
+        this.showLogin();
+        Toast.show('تم تسجيل الخروج', 'success');
+    },
+
+    async tryRestoreSession() {
+        const savedUser = await Vault.get('ab_current_user', null);
+        if (savedUser) {
+            AppStore.setState({ user: savedUser });
+            await App.enterApp();
+        }
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 9b. GOOGLE SIGN-IN (Google Identity Services — client-side only)
+ *     Requires the user's own OAuth Client ID (Settings -> Google), the same
+ *     "bring your own credentials" pattern used for the AI API key. Without a
+ *     client ID we show a fallback button that explains how to set one up
+ *     instead of pretending to sign the person in.
+ * ------------------------------------------------------------------------- */
+const GoogleAuth = {
+    clientId: '',
+    scriptLoaded: false,
+
+    async init() {
+        this.clientId = await Vault.get('ab_google_client_id', '');
+        if (!this.clientId) {
+            const l = document.getElementById('googleNotConfiguredHintLogin'); if (l) l.style.display = 'block';
+            const r = document.getElementById('googleNotConfiguredHintRegister'); if (r) r.style.display = 'block';
+            return;
+        }
+        await this.loadScript();
+        this.render();
+    },
+
+    loadScript() {
+        if (this.scriptLoaded) return Promise.resolve();
+        return new Promise((resolve) => {
+            const s = document.createElement('script');
+            s.src = 'https://accounts.google.com/gsi/client';
+            s.async = true; s.defer = true;
+            s.onload = () => { this.scriptLoaded = true; resolve(); };
+            s.onerror = () => { console.warn('[GoogleAuth] failed to load Google Identity script (offline or blocked?)'); resolve(); };
+            document.head.appendChild(s);
+        });
+    },
+
+    render() {
+        if (!window.google || !google.accounts || !google.accounts.id || !this.clientId) return;
+        try {
+            google.accounts.id.initialize({ client_id: this.clientId, callback: (resp) => this.handleCredential(resp) });
+            ['googleBtnLogin', 'googleBtnRegister'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', width: 280, locale: I18n.current });
+            });
+        } catch (e) {
+            console.error('[GoogleAuth] render failed', e);
+        }
+    },
+
+    // Decode the JWT payload locally — no server round-trip, since this app has none.
+    decodeJwt(token) {
+        try {
+            const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+            const json = decodeURIComponent(atob(base64).split('').map((c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0')).join(''));
+            return JSON.parse(json);
+        } catch (e) { return null; }
+    },
+
+    async handleCredential(response) {
+        await ErrorBoundary.wrap(async () => {
+            const payload = this.decodeJwt(response.credential);
+            if (!payload || !payload.email) { Toast.show('تعذّر قراءة بيانات حساب Google', 'error'); return; }
+            let users = await Vault.get('ab_users', []);
+            let user = users.find((u) => u.email === payload.email);
+            if (!user) {
+                user = {
+                    id: 'g_' + (payload.sub || Date.now().toString(36)),
+                    name: payload.name || payload.email.split('@')[0],
+                    email: payload.email,
+                    salt: CryptoUtil.randomSaltHex(),
+                    passwordHash: null,
+                    provider: 'google',
+                    picture: payload.picture || ''
+                };
+                users.push(user);
+                await Vault.set('ab_users', users);
+            }
+            const publicUser = { id: user.id, name: user.name, email: user.email, picture: user.picture || '' };
+            AppStore.setState({ user: publicUser });
+            await Vault.set('ab_current_user', publicUser);
+            Toast.show('تم تسجيل الدخول عبر Google بنجاح', 'success');
+            await App.enterApp();
+        }, 'تعذّر تسجيل الدخول عبر Google.');
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 10. CHAT MANAGER
+ * ------------------------------------------------------------------------- */
+const ChatManager = {
+    searchDebounceTimer: null,
+
+    async loadChats() {
+        const user = AppStore.getState().user;
+        if (!user) return;
+        const chats = await Vault.get('ab_chats_' + user.id, []);
+        AppStore.setState({ chats });
+        this.renderHistory();
+    },
+
+    async saveChats() {
+        const user = AppStore.getState().user;
+        if (!user) return;
+        await Vault.set('ab_chats_' + user.id, AppStore.getState().chats);
+    },
+
+    newChat() {
+        const chat = { id: Date.now(), title: 'محادثة جديدة', messages: [], createdAt: new Date().toISOString() };
+        const chats = [chat, ...AppStore.getState().chats];
+        AppStore.setState({ chats, currentChatId: chat.id });
+        this.saveChats();
+        this.renderHistory();
+        document.getElementById('welcome').style.display = 'block';
+        document.getElementById('messages').style.display = 'none';
+        document.getElementById('messages').innerHTML = '';
+        if (window.innerWidth <= 1024) UI.closeSidebar();
+    },
+
+    onSearchInput(value) {
+        AppStore.setState({ searchQuery: value });
+        document.getElementById('searchBox').classList.toggle('has-value', !!value);
+        clearTimeout(this.searchDebounceTimer);
+        this.searchDebounceTimer = setTimeout(() => this.renderHistory(), 120);
+    },
+
+    clearSearch() {
+        document.getElementById('historySearch').value = '';
+        AppStore.setState({ searchQuery: '' });
+        document.getElementById('searchBox').classList.remove('has-value');
+        this.renderHistory();
+    },
+
+    focusSearch() {
+        if (window.innerWidth <= 1024) UI.openSidebar();
+        const input = document.getElementById('historySearch');
+        input.focus();
+        input.select();
+    },
+
+    highlightMatch(text, query) {
+        if (!query) return Sanitize.escapeHtml(text);
+        const escaped = Sanitize.escapeHtml(text);
+        const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        try {
+            const re = new RegExp('(' + escapedQuery + ')', 'ig');
+            return escaped.replace(re, '<mark>$1</mark>');
+        } catch (e) { return escaped; }
+    },
+
+    renderHistory() {
+        const container = document.getElementById('chatHistory');
+        const { chats, currentChatId, searchQuery } = AppStore.getState();
+        const q = searchQuery.trim().toLowerCase();
+
+        const filtered = !q ? chats : chats.filter((c) => {
+            if (c.title.toLowerCase().includes(q)) return true;
+            return c.messages.some((m) => m.content.toLowerCase().includes(q));
+        });
+
+        if (filtered.length === 0) {
+            container.innerHTML = '<div class="history-empty">' + (q ? 'لا توجد نتائج مطابقة' : 'لا توجد محادثات بعد') + '</div>';
+            return;
+        }
+
+        container.innerHTML = filtered.map((c) => (
+            '<div class="history-item ' + (c.id === currentChatId ? 'active' : '') + '" onclick="ChatManager.loadChat(' + c.id + ')">' +
+                '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>' +
+                '<span class="history-title">' + this.highlightMatch(c.title, q) + '</span>' +
+                '<span class="item-actions">' +
+                    '<button class="item-action-btn" onclick="event.stopPropagation();ChatManager.renameChat(' + c.id + ')" title="إعادة تسمية" aria-label="إعادة تسمية"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button>' +
+                    '<button class="item-action-btn" onclick="event.stopPropagation();ChatManager.deleteChat(' + c.id + ')" title="حذف" aria-label="حذف"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg></button>' +
+                '</span>' +
+            '</div>'
+        )).join('');
+    },
+
+    renameChat(id) {
+        const chat = AppStore.getState().chats.find((c) => c.id === id);
+        if (!chat) return;
+        const name = prompt('اسم جديد للمحادثة:', chat.title);
+        if (name && name.trim()) {
+            chat.title = name.trim().substring(0, 60);
+            AppStore.setState({ chats: [...AppStore.getState().chats] });
+            this.saveChats();
+            this.renderHistory();
+        }
+    },
+
+    deleteChat(id) {
+        Confirm.ask('حذف المحادثة؟', 'سيتم حذف هذه المحادثة نهائياً من هذا الجهاز.', () => {
+            const { chats, currentChatId } = AppStore.getState();
+            const next = chats.filter((c) => c.id !== id);
+            AppStore.setState({ chats: next, currentChatId: currentChatId === id ? null : currentChatId });
+            this.saveChats();
+            this.renderHistory();
+            if (currentChatId === id) {
+                document.getElementById('welcome').style.display = 'block';
+                document.getElementById('messages').style.display = 'none';
+                document.getElementById('messages').innerHTML = '';
+            }
+            Toast.show('تم حذف المحادثة', 'success', 1800);
+        });
+    },
+
+    loadChat(id) {
+        const chat = AppStore.getState().chats.find((c) => c.id === id);
+        if (!chat) return;
+        AppStore.setState({ currentChatId: id });
+        this.renderHistory();
+        document.getElementById('welcome').style.display = 'none';
+        const msgContainer = document.getElementById('messages');
+        msgContainer.style.display = 'flex';
+        msgContainer.innerHTML = '';
+        chat.messages.forEach((m) => MessageRenderer.appendToDOM(m.role, m.content, false, { image: m.image, sources: m.sources, fileNote: m.fileNote, providerNote: m.providerNote, isError: m.isError }));
+        if (window.innerWidth <= 1024) UI.closeSidebar();
+    },
+
+    handleKey(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            this.sendMessage();
+        }
+    },
+
+    sendQuick(text) {
+        document.getElementById('userInput').value = text;
+        this.sendMessage();
+    },
+
+    cycleModel() {
+        const state = AppStore.getState();
+        const next = state.model === 'flash' ? 'pro' : 'flash';
+        AppStore.setState({ model: next });
+        document.getElementById('modelName').textContent = next === 'flash' ? 'المساعد السريع' : 'المساعد المتقدم';
+        Toast.show('تم التبديل إلى ' + (next === 'flash' ? 'المساعد السريع' : 'المساعد المتقدم'), 'success', 1600);
+    },
+
+    ensureProxyConfigured() {
+        // AI_PROXY_URL يقدر يكون فارغاً '' (نفس الدومين على Vercel) وهذا طبيعي وصحيح.
+        return true;
+    },
+
+    // A short, model-facing system instruction so replies come back concise
+    // and clearly structured — short paragraphs, bullets where useful,
+    // headers only for longer answers — rather than one long wall of text.
+    buildSystemInstruction() {
+        return 'أنت "abdelrezakbezzag"، المساعد الذكي داخل هذا التطبيق الذي طوّره عبد الرزاق بزّاق (Abdelrezak Bezzag). ' +
+            'إذا سُئلت عن اسمك أو من طوّرك، عرّف نفسك بهذا الاسم مباشرة. ' +
+            'أجب بإيجاز ووضوح: جمل قصيرة، فقرات منظمة، واستخدم نقاطاً أو عناوين فرعية فقط عندما يفيد ذلك فهم إجابة طويلة أو متعددة الخطوات. ' +
+            'تجنّب الحشو والتكرار، وابدأ مباشرة بالمفيد من الإجابة. أجب بنفس لغة رسالة المستخدم.';
+    },
+
+    toggleWebSearch() {
+        const state = AppStore.getState();
+        const next = !state.webSearchOn;
+        AppStore.setState({ webSearchOn: next, imageModeOn: next ? false : state.imageModeOn });
+        this.syncToolbarUI();
+        if (next) Toast.show('سيحاول المساعد البحث في الويب قبل الإجابة', 'info', 2200);
+    },
+
+    toggleImageMode() {
+        const state = AppStore.getState();
+        const next = !state.imageModeOn;
+        AppStore.setState({ imageModeOn: next, webSearchOn: next ? false : state.webSearchOn });
+        this.syncToolbarUI();
+        if (next) Toast.show('اكتب وصف الصورة التي تريد توليدها ثم أرسل', 'info', 2600);
+    },
+
+    syncToolbarUI() {
+        const state = AppStore.getState();
+        const searchBtn = document.getElementById('webSearchToggle');
+        const imageBtn = document.getElementById('imageModeToggle');
+        if (searchBtn) searchBtn.classList.toggle('active', state.webSearchOn);
+        if (imageBtn) imageBtn.classList.toggle('active', state.imageModeOn);
+        const hint = document.getElementById('inputHint');
+        if (hint) hint.textContent = state.imageModeOn ? '🖼️ وضع توليد الصور مفعّل' : (state.webSearchOn ? '🌐 البحث في الويب مفعّل' : '');
+    },
+
+    async sendMessage() {
+        const input = document.getElementById('userInput');
+        const text = input.value.trim();
+        const state = AppStore.getState();
+        const attachments = FileAttach.getPending();
+        if ((!text && attachments.length === 0) || state.isLoading) return;
+
+        if (!state.currentChatId) this.newChat();
+
+        if (!this.ensureProxyConfigured()) return;
+
+        const imgAttachment = attachments.find((a) => a.kind === 'image');
+        const otherNames = attachments.filter((a) => a !== imgAttachment).map((a) => a.name).join('، ');
+        this.addMessage('user', text || '(صورة بدون نص)', {
+            image: imgAttachment ? ('data:' + imgAttachment.mimeType + ';base64,' + imgAttachment.data) : null,
+            fileNote: otherNames || null
+        });
+
+        const imageModeOn = state.imageModeOn;
+        const webSearchOn = state.webSearchOn;
+
+        input.value = '';
+        input.style.height = 'auto';
+        FileAttach.clear();
+
+        MessageRenderer.showTyping();
+        AppStore.setState({ isLoading: true });
+        this._activeAbort = new AbortController();
+        this._setSendBtnState(true);
+
+        try {
+            const models = await Vault.get('ab_model_ids', {
+                flash: 'deepseek/deepseek-chat:free', pro: 'deepseek/deepseek-r1:free', image: 'google/gemini-2.5-flash-image:free'
+            });
+
+            if (imageModeOn) {
+                await this.requestImage(models.image || 'google/gemini-2.5-flash-image:free', text);
+            } else {
+                await this.requestText(AppStore.getState().model === 'flash' ? models.flash : models.pro, attachments, webSearchOn);
+            }
+        } catch (error) {
+            MessageRenderer.hideTyping();
+            if (error && error.name === 'AbortError') {
+                this.addMessage('bot', '⏹️ تم إيقاف توليد الرد بطلب منك.', { isError: false });
+                Toast.show('تم إيقاف التوليد', 'info', 1800);
+            } else {
+                console.error('[ChatManager.sendMessage]', error);
+                this.addMessage('bot', '❌ عذراً، حدث خطأ: ' + error.message, { isError: true });
+                Toast.show('حدث خطأ في الاتصال', 'error');
+            }
+        } finally {
+            AppStore.setState({ isLoading: false });
+            this._activeAbort = null;
+            this._setSendBtnState(false);
+        }
+    },
+
+    // Toggles the send button between its normal "send" look/behavior and a
+    // "stop generating" look/behavior while a request is in flight. The
+    // button stays enabled in both states — during loading, clicking it
+    // aborts the in-flight request instead of doing nothing.
+    _setSendBtnState(isLoading) {
+        const btn = document.getElementById('sendBtn');
+        const icon = document.getElementById('sendBtnIcon');
+        if (!btn || !icon) return;
+        btn.classList.toggle('is-stop', isLoading);
+        btn.setAttribute('aria-label', isLoading ? 'إيقاف التوليد' : 'إرسال');
+        icon.innerHTML = isLoading
+            ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>'
+            : '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
+    },
+
+    handleSendBtnClick() {
+        if (AppStore.getState().isLoading) {
+            this.stopGenerating();
+        } else {
+            this.sendMessage();
+        }
+    },
+
+    // Aborts the current in-flight text/image request, if any. The fetch
+    // rejection this triggers is caught in sendMessage()'s try/catch as an
+    // AbortError and rendered as a calm "stopped" message instead of an error.
+    stopGenerating() {
+        if (this._activeAbort) {
+            this._activeAbort.abort();
+            Toast.show('جارٍ إيقاف التوليد...', 'info', 1400);
+        }
+    },
+
+    // Low-level proxy call. Throws an Error whose `.status` is the HTTP
+    // status code, so callers can decide whether the failure is worth
+    // retrying.
+    async _callProxy(path, body) {
+        const endpoint = AI_PROXY_URL.replace(/\/$/, '') + path;
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: this._activeAbort ? this._activeAbort.signal : undefined
+        });
+        if (!response.ok) {
+            let message = 'تعذّر الاتصال بالخادم (رمز ' + response.status + ')';
+            try {
+                const err = await response.json();
+                if (err && err.error && err.error.message) message = err.error.message;
+            } catch (e) { /* response body wasn't JSON */ }
+            const error = new Error(message);
+            error.status = response.status;
+            throw error;
+        }
+        return response.json();
+    },
+
+    // True for the class of errors worth retrying: rate limits / quota
+    // exhaustion (429) and upstream server errors (5xx). Not true for real
+    // user-facing errors (bad request, invalid key, etc), which should
+    // surface as-is rather than being retried silently.
+    isRetryableProviderError(error) {
+        if (!error) return false;
+        if (error.status === 429 || (error.status >= 500 && error.status < 600)) return true;
+        const msg = (error.message || '').toLowerCase();
+        return msg.includes('quota') || msg.includes('rate limit') || msg.includes('rate_limit') || msg.includes('resource_exhausted');
+    },
+
+    // Retries an async operation on retryable errors only (429 / 5xx), with
+    // a short growing delay between attempts. This is what keeps a
+    // single-provider (OpenRouter-only) setup resilient without a fallback
+    // chain of other providers: a transient hiccup gets a couple of quick
+    // retries against the SAME endpoint instead of failing immediately.
+    async _withRetry(fn, attempts = 3, baseDelayMs = 500) {
+        let lastError;
+        for (let i = 0; i < attempts; i++) {
+            try {
+                return await fn();
+            } catch (error) {
+                lastError = error;
+                if (error && error.name === 'AbortError') throw error;
+                if (i === attempts - 1 || !this.isRetryableProviderError(error)) throw error;
+                Toast.show('الخادم مشغول، إعادة المحاولة...', 'info', 1600);
+                await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (i + 1)));
+            }
+        }
+        throw lastError;
+    },
+
+    // Builds the OpenAI/OpenRouter-style `messages` array from the current
+    // chat's stored messages, attaching any pending file/image parts to the
+    // last user turn. Shared by the streaming and non-streaming paths.
+    _buildTextContents(attachments) {
+        const chat = AppStore.getState().chats.find((c) => c.id === AppStore.getState().currentChatId);
+        const messages = chat ? chat.messages : [];
+        const lastIndex = messages.length - 1;
+
+        return messages.map((m, idx) => {
+            const role = m.role === 'user' ? 'user' : 'assistant';
+            const isLastUser = idx === lastIndex && m.role === 'user';
+            if (!isLastUser || !attachments.length) return { role, content: m.content || '' };
+
+            // Multimodal turn: OpenAI/OpenRouter vision format uses an array
+            // of typed parts instead of a plain string.
+            const parts = [];
+            if (m.content) parts.push({ type: 'text', text: m.content });
+            attachments.forEach((a) => {
+                if (a.kind === 'image') {
+                    parts.push({ type: 'image_url', image_url: { url: 'data:' + a.mimeType + ';base64,' + a.data } });
+                } else if (a.kind === 'text') {
+                    parts.push({ type: 'text', text: '\n\n--- ملف مرفق: ' + a.name + ' ---\n' + a.data.slice(0, 20000) });
+                } else {
+                    parts.push({ type: 'text', text: '\n\n(تم إرفاق ملف "' + a.name + '" لكن لا يمكن قراءة محتوى هذا النوع مباشرة في المتصفح.)' });
+                }
+            });
+            return { role, content: parts };
+        });
+    },
+
+    // Streams the reply token-by-token from /api/generateTextOpenRouter
+    // using the standard OpenAI-compatible SSE shape ("data: {...}" lines
+    // ending with "data: [DONE]"), growing a live bubble as chunks arrive.
+    // Throws on any failure — to start, or partway through — so the caller
+    // can fall back to the plain (non-streaming) call without leaving a
+    // half-written bubble on screen.
+    async _streamFromOpenRouter(body) {
+        const endpoint = AI_PROXY_URL.replace(/\/$/, '') + '/api/generateTextOpenRouter';
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign({}, body, { stream: true })),
+            signal: this._activeAbort ? this._activeAbort.signal : undefined
+        });
+
+        if (!response.ok || !response.body) {
+            let message = 'تعذّر بدء البث (رمز ' + response.status + ')';
+            try {
+                const err = await response.json();
+                if (err && err.error && err.error.message) message = err.error.message;
+            } catch (e) { /* not JSON */ }
+            const error = new Error(message);
+            error.status = response.status;
+            throw error;
+        }
+
+        MessageRenderer.hideTyping();
+        const bubble = MessageRenderer.beginBotBubble();
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let reply = '';
+        let sources = null;
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // keep the last (possibly incomplete) line for next round
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed.startsWith('data:')) continue;
+                    const jsonStr = trimmed.slice(5).trim();
+                    if (!jsonStr || jsonStr === '[DONE]') continue;
+
+                    let evt;
+                    try { evt = JSON.parse(jsonStr); } catch (e) { continue; }
+
+                    if (evt.error) {
+                        const error = new Error(evt.error.message || 'خطأ من المزوّد أثناء البث');
+                        error.status = evt.error.code || 500;
+                        throw error;
+                    }
+                    const choice = evt.choices && evt.choices[0];
+                    const deltaText = choice && choice.delta ? (choice.delta.content || '') : '';
+                    if (deltaText) { reply += deltaText; bubble.update(reply); }
+                    const annotations = choice && choice.delta && choice.delta.annotations;
+                    if (annotations && annotations.length) {
+                        sources = annotations.filter((c) => c.url_citation && c.url_citation.url).slice(0, 6)
+                            .map((c) => ({ title: c.url_citation.title || c.url_citation.url, uri: c.url_citation.url }));
+                    }
+                }
+            }
+        } catch (streamErr) {
+            bubble.remove();
+            throw streamErr;
+        }
+
+        if (!reply) { bubble.remove(); throw new Error('لم يصل أي رد من البث.'); }
+        return { reply, sources, bubble };
+    },
+
+    async requestText(modelId, attachments, webSearchOn) {
+        const messages = this._buildTextContents(attachments);
+        messages.unshift({ role: 'system', content: this.buildSystemInstruction() });
+        // OpenRouter's ":online" suffix turns any model into a web-search-
+        // grounded one for that one request — no separate tool wiring needed.
+        const effectiveModel = (webSearchOn && !modelId.endsWith(':online')) ? modelId + ':online' : modelId;
+        const body = { model: effectiveModel, messages, temperature: 0.8, top_p: 0.95, max_tokens: 8192 };
+
+        // 1) Try a real-time streamed reply first — this is what modern AI
+        //    chat apps do: text appears progressively instead of all at once.
+        try {
+            const { reply, sources, bubble } = await this._streamFromOpenRouter(body);
+            bubble.finish(reply, { sources });
+            this.addMessage('bot', reply, { sources, skipDom: true });
+            return;
+        } catch (streamError) {
+            if (streamError && streamError.name === 'AbortError') throw streamError; // user hit "stop"
+            console.warn('[requestText] streaming unavailable, falling back:', streamError);
+            MessageRenderer.showTyping(); // no-op if already showing
+        }
+
+        // 2) Streaming didn't work (older browser, network hiccup, or a
+        //    transient error) — fall back to a plain call against the SAME
+        //    OpenRouter endpoint, retried a couple of times on 429/5xx via
+        //    _withRetry() before surfacing an error to the user.
+        const data = await this._withRetry(() => this._callProxy('/api/generateTextOpenRouter', Object.assign({}, body, { stream: false })));
+
+        const choice = data.choices && data.choices[0];
+        const reply = choice && choice.message ? (choice.message.content || '') : '';
+
+        let sources = null;
+        const annotations = choice && choice.message && choice.message.annotations;
+        if (annotations && annotations.length) {
+            sources = annotations.filter((c) => c.url_citation && c.url_citation.url).slice(0, 6)
+                .map((c) => ({ title: c.url_citation.title || c.url_citation.url, uri: c.url_citation.url }));
+        }
+
+        MessageRenderer.hideTyping();
+        this.addMessage('bot', reply || 'لم أتمكن من فهم سؤالك، حاول مرة أخرى.', { sources });
+    },
+
+    // Image generation also goes through the same single OpenRouter proxy
+    // (/api/generateTextOpenRouter) — just with an image-capable model id
+    // and `modalities: ['image','text']`. OpenRouter returns generated
+    // images inline on the assistant message as `message.images[]`, each
+    // `{ type: 'image_url', image_url: { url: 'data:image/...;base64,...' } }`.
+    async requestImage(modelId, prompt) {
+        if (!prompt) {
+            MessageRenderer.hideTyping();
+            this.addMessage('bot', 'اكتب وصفاً للصورة التي تريد توليدها.', { isError: true });
+            return;
+        }
+        let data;
+        try {
+            data = await this._withRetry(() => this._callProxy('/api/generateTextOpenRouter', {
+                model: modelId,
+                messages: [{ role: 'user', content: prompt }],
+                modalities: ['image', 'text'],
+                stream: false
+            }));
+        } catch (error) {
+            MessageRenderer.hideTyping();
+            this.addMessage('bot', '❌ ' + error.message + ' — تأكد أن معرّف نموذج توليد الصور صحيح في الإعدادات المتقدمة، وأنه يدعم إخراج الصور على OpenRouter.', { isError: true });
+            return;
+        }
+
+        const message = data.choices && data.choices[0] && data.choices[0].message;
+        const imagePart = message && message.images && message.images[0];
+        const url = imagePart && imagePart.image_url && imagePart.image_url.url;
+        MessageRenderer.hideTyping();
+        if (!url) {
+            this.addMessage('bot', 'لم يُرجع النموذج صورة صالحة. حاول صياغة الوصف بشكل مختلف، أو تأكد أن النموذج المختار يدعم توليد الصور.', { isError: true });
+            return;
+        }
+        this.addMessage('bot', 'إليك الصورة التي طلبتها: "' + prompt + '"', { image: url });
+    },
+
+    addMessage(role, content, opts = {}) {
+        const state = AppStore.getState();
+        const chat = state.chats.find((c) => c.id === state.currentChatId);
+        if (!chat) return;
+
+        const record = { role, content, ts: new Date().toISOString() };
+        if (opts.image) record.image = opts.image;
+        if (opts.sources) record.sources = opts.sources;
+        if (opts.fileNote) record.fileNote = opts.fileNote;
+        if (opts.providerNote) record.providerNote = opts.providerNote;
+        if (opts.isError) record.isError = true;
+        chat.messages.push(record);
+        if (chat.messages.length === 1 && role === 'user') {
+            chat.title = content.substring(0, 30) + (content.length > 30 ? '...' : '');
+        }
+        AppStore.setState({ chats: [...state.chats] });
+        this.renderHistory();
+        this.saveChats();
+
+        document.getElementById('welcome').style.display = 'none';
+        const msgContainer = document.getElementById('messages');
+        msgContainer.style.display = 'flex';
+        // skipDom: the streaming path already rendered its own bubble via
+        // MessageRenderer.beginBotBubble()/finish(), so don't append twice.
+        if (!opts.skipDom) MessageRenderer.appendToDOM(role, content, true, opts);
+    },
+
+    // Drops the last bot reply and re-requests it for the same prompt —
+    // the "regenerate" action on a bot message. Only works on the chat's
+    // most recent exchange; older replies show a hint instead. Note: if the
+    // original prompt had an image/file attached, only the text history is
+    // replayed (the attachment itself isn't resent).
+    async regenerateLast() {
+        const state = AppStore.getState();
+        if (state.isLoading) return;
+        const chat = state.chats.find((c) => c.id === state.currentChatId);
+        if (!chat || !chat.messages.length) return;
+
+        const messages = chat.messages;
+        if (messages[messages.length - 1].role !== 'bot') {
+            Toast.show('إعادة التوليد متاحة فقط لآخر رد في المحادثة', 'info', 2400);
+            return;
+        }
+        if (messages.length < 2 || messages[messages.length - 2].role !== 'user') return;
+
+        messages.pop();
+        AppStore.setState({ chats: [...state.chats] });
+        this.saveChats();
+        const msgContainer = document.getElementById('messages');
+        const bubbles = msgContainer.querySelectorAll('.msg.bot');
+        const lastBubble = bubbles[bubbles.length - 1];
+        if (lastBubble) lastBubble.remove();
+
+        MessageRenderer.showTyping();
+        AppStore.setState({ isLoading: true });
+        this._activeAbort = new AbortController();
+        this._setSendBtnState(true);
+        try {
+            const models = await Vault.get('ab_model_ids', {
+                flash: 'deepseek/deepseek-chat:free', pro: 'deepseek/deepseek-r1:free', image: 'google/gemini-2.5-flash-image:free'
+            });
+            const s = AppStore.getState();
+            await this.requestText(s.model === 'flash' ? models.flash : models.pro, [], s.webSearchOn);
+        } catch (error) {
+            MessageRenderer.hideTyping();
+            if (error && error.name === 'AbortError') {
+                this.addMessage('bot', '⏹️ تم إيقاف توليد الرد بطلب منك.', { isError: false });
+                Toast.show('تم إيقاف التوليد', 'info', 1800);
+            } else {
+                console.error('[ChatManager.regenerateLast]', error);
+                this.addMessage('bot', '❌ عذراً، حدث خطأ: ' + error.message, { isError: true });
+                Toast.show('حدث خطأ في الاتصال', 'error');
+            }
+        } finally {
+            AppStore.setState({ isLoading: false });
+            this._activeAbort = null;
+            this._setSendBtnState(false);
+        }
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 10b. FILE ATTACH — pick, read (image/pdf as base64, text inline), preview,
+ *      and hand off to ChatManager.sendMessage as extra message parts.
+ * ------------------------------------------------------------------------- */
+const FileAttach = {
+    pending: [],
+    MAX_FILES: 4,
+    MAX_BYTES: 8 * 1024 * 1024,
+
+    pickFile() { document.getElementById('chatFileInput').click(); },
+
+    getPending() { return this.pending; },
+
+    clear() {
+        this.pending = [];
+        document.getElementById('chatFileInput').value = '';
+        this.render();
+    },
+
+    remove(idx) {
+        this.pending.splice(idx, 1);
+        this.render();
+    },
+
+    async onFilesPicked(fileList) {
+        const files = Array.from(fileList || []);
+        for (const file of files) {
+            if (this.pending.length >= this.MAX_FILES) {
+                Toast.show('يمكن إرفاق ' + this.MAX_FILES + ' ملفات كحد أقصى في كل رسالة', 'warning', 3000);
+                break;
+            }
+            if (file.size > this.MAX_BYTES) {
+                Toast.show('الملف "' + file.name + '" أكبر من 8 ميغابايت، جرّب ملفاً أصغر', 'warning', 3200);
+                continue;
+            }
+            try {
+                const item = await this.readFile(file);
+                this.pending.push(item);
+            } catch (e) {
+                console.error('[FileAttach] read failed', e);
+                Toast.show('تعذّر قراءة الملف "' + file.name + '"', 'error');
+            }
+        }
+        this.render();
+        document.getElementById('chatFileInput').value = '';
+    },
+
+    readFile(file) {
+        const isImage = file.type.startsWith('image/');
+        const isPdf = file.type === 'application/pdf';
+        const isTextLike = /^text\/|json|csv|xml|javascript|markdown/.test(file.type) || /\.(txt|md|csv|json|js|ts|py|html|css|log|yml|yaml)$/i.test(file.name);
+
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(reader.error);
+            if (isImage || isPdf) {
+                reader.onload = () => {
+                    const base64 = String(reader.result).split(',')[1] || '';
+                    resolve({ name: file.name, size: file.size, mimeType: file.type || 'application/octet-stream', kind: isImage ? 'image' : 'pdf', data: base64 });
+                };
+                reader.readAsDataURL(file);
+            } else if (isTextLike) {
+                reader.onload = () => resolve({ name: file.name, size: file.size, mimeType: file.type || 'text/plain', kind: 'text', data: String(reader.result || '') });
+                reader.readAsText(file);
+            } else {
+                resolve({ name: file.name, size: file.size, mimeType: file.type || 'application/octet-stream', kind: 'binary', data: '' });
+            }
+        });
+    },
+
+    formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    },
+
+    render() {
+        const list = document.getElementById('attachList');
+        if (!list) return;
+        list.innerHTML = this.pending.map((a, idx) => {
+            const thumb = a.kind === 'image'
+                ? '<img src="data:' + a.mimeType + ';base64,' + a.data + '" alt="">'
+                : '<span style="font-size:1.2rem">' + (a.kind === 'pdf' ? '📄' : (a.kind === 'text' ? '📝' : '📎')) + '</span>';
+            return '<div class="attach-chip">' + thumb +
+                '<div class="attach-meta"><div class="attach-name">' + Sanitize.escapeHtml(a.name) + '</div>' +
+                '<div class="attach-size">' + this.formatSize(a.size) + ' &middot; ' + Sanitize.escapeHtml(a.mimeType || '') + '</div></div>' +
+                '<button class="attach-remove" onclick="FileAttach.remove(' + idx + ')" aria-label="إزالة"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>' +
+                '</div>';
+        }).join('');
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 11. MESSAGE RENDERING (markdown-lite + XSS-safe)
+ * ------------------------------------------------------------------------- */
+const MessageRenderer = {
+    format(text) {
+        let html = Sanitize.escapeHtml(text || '');
+        const codeBlocks = [];
+        html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (m, lang, code) => {
+            codeBlocks.push(code);
+            return '\u0000CODE' + (codeBlocks.length - 1) + '\u0000';
+        });
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        html = html.replace(/^\s*#{3}\s+(.+)$/gm, '<h3>$1</h3>');
+        html = html.replace(/^\s*#{2}\s+(.+)$/gm, '<h2>$1</h2>');
+        html = html.replace(/^\s*#{1}\s+(.+)$/gm, '<h1>$1</h1>');
+        html = html.replace(/^\s*&gt;\s?(.+)$/gm, '<blockquote>$1</blockquote>');
+        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/__(.*?)__/g, '<strong>$1</strong>');
+        html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, url) => {
+            const safeUrl = Sanitize.isSafeUrl(url) ? url : '#';
+            return '<a href="' + safeUrl + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+        });
+        html = html.replace(/^\s*\d+[.)]\s+(.+)$/gm, '\u0000OLI\u0000$1\u0000/OLI\u0000');
+        html = html.replace(/(?:\u0000OLI\u0000.*\u0000\/OLI\u0000\n?)+/g, (m) => '<ol>' + m.replace(/\u0000OLI\u0000/g, '<li>').replace(/\u0000\/OLI\u0000/g, '</li>') + '</ol>');
+        html = html.replace(/^\s*[-*]\s+(.+)$/gm, '<li>$1</li>');
+        html = html.replace(/(<li>(?!<\/ol>).*<\/li>\n?)+/g, (m) => (m.includes('<ol>') ? m : '<ul>' + m + '</ul>'));
+        html = html.replace(/\n/g, '<br>');
+        html = html.replace(/<br>(<\/?(?:h1|h2|h3|ul|ol|li|blockquote)>)/g, '$1');
+        html = html.replace(/(<\/?(?:h1|h2|h3|ul|ol|blockquote)>)<br>/g, '$1');
+        html = html.replace(/\u0000CODE(\d+)\u0000/g, (m, i) => '<pre><code>' + codeBlocks[Number(i)] + '</code></pre>');
+        return html;
+    },
+
+    appendToDOM(role, content, animate, opts = {}) {
+        const container = document.getElementById('messages');
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'msg ' + role + (opts.isError ? ' msg-error' : '');
+        if (animate) msgDiv.style.animation = 'msgIn 0.4s ease';
+
+        const user = AppStore.getState().user;
+        const avatar = document.createElement('div');
+        avatar.className = 'msg-avatar';
+        if (role === 'user' && user && user.picture) {
+            avatar.innerHTML = '<img src="' + Sanitize.escapeHtml(user.picture) + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover">';
+        } else {
+            avatar.textContent = role === 'user' ? (user && user.name ? user.name.charAt(0).toUpperCase() : 'أ') : '🤖';
+        }
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'msg-content';
+
+        let innerHtml = '';
+        if (opts.fileNote) {
+            innerHtml += '<div class="msg-file-note">📎 ' + Sanitize.escapeHtml(opts.fileNote) + '</div>';
+        }
+        innerHtml += this.format(content);
+        if (opts.image) {
+            innerHtml += '<div class="msg-image-wrap"><img class="msg-image" src="' + opts.image + '" alt="image" loading="lazy"></div>';
+        }
+        if (opts.sources && opts.sources.length) {
+            innerHtml += '<div class="msg-sources">' + opts.sources.map((s) =>
+                '<a class="msg-source-chip" href="' + Sanitize.escapeHtml(s.uri) + '" target="_blank" rel="noopener noreferrer">🔗 ' + Sanitize.escapeHtml(s.title) + '</a>'
+            ).join('') + '</div>';
+        }
+        if (opts.providerNote) {
+            innerHtml += '<div class="msg-provider-note">ℹ️ ' + Sanitize.escapeHtml(opts.providerNote) + '</div>';
+        }
+        contentDiv.innerHTML = innerHtml;
+
+        msgDiv.appendChild(avatar);
+        msgDiv.appendChild(contentDiv);
+        container.appendChild(msgDiv);
+        container.scrollTop = container.scrollHeight;
+
+        contentDiv.querySelectorAll('pre').forEach((pre) => {
+            const header = document.createElement('div');
+            header.className = 'code-header';
+            const lang = document.createElement('span');
+            lang.className = 'code-lang';
+            lang.textContent = 'كود';
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'copy-btn';
+            copyBtn.textContent = 'نسخ';
+            copyBtn.type = 'button';
+            copyBtn.onclick = () => {
+                ClipboardUtil.copy(pre.textContent).then((ok) => {
+                    if (ok) {
+                        copyBtn.textContent = '✓ تم النسخ';
+                        copyBtn.classList.add('copied');
+                        setTimeout(() => { copyBtn.textContent = 'نسخ'; copyBtn.classList.remove('copied'); }, 2000);
+                    } else {
+                        Toast.show('تعذّر نسخ الكود', 'error', 1800);
+                    }
+                });
+            };
+            header.appendChild(lang);
+            header.appendChild(copyBtn);
+            pre.insertBefore(header, pre.firstChild);
+        });
+
+        if (role === 'bot' && !opts.isError) {
+            const actions = document.createElement('div');
+            actions.className = 'msg-actions';
+
+            const copyMsgBtn = document.createElement('button');
+            copyMsgBtn.type = 'button';
+            copyMsgBtn.className = 'msg-action-btn';
+            copyMsgBtn.innerHTML = '📋 <span>نسخ الرد</span>';
+            copyMsgBtn.onclick = () => {
+                ClipboardUtil.copy(content).then((ok) => {
+                    if (ok) {
+                        copyMsgBtn.classList.add('copied');
+                        copyMsgBtn.innerHTML = '✓ <span>تم النسخ</span>';
+                        setTimeout(() => {
+                            copyMsgBtn.classList.remove('copied');
+                            copyMsgBtn.innerHTML = '📋 <span>نسخ الرد</span>';
+                        }, 2000);
+                    } else {
+                        Toast.show('تعذّر نسخ الرد', 'error', 1800);
+                    }
+                });
+            };
+            actions.appendChild(copyMsgBtn);
+
+            const regenBtn = document.createElement('button');
+            regenBtn.type = 'button';
+            regenBtn.className = 'msg-action-btn';
+            regenBtn.innerHTML = '🔄 <span>إعادة توليد</span>';
+            regenBtn.onclick = () => ChatManager.regenerateLast();
+            actions.appendChild(regenBtn);
+
+            contentDiv.appendChild(actions);
+        }
+    },
+
+    // Creates a live bot bubble for streamed replies. Returns handles to grow
+    // its text as chunks arrive, drop it silently on a mid-stream error, or
+    // swap it for the normal fully-featured bubble (sources, copy/regenerate
+    // actions, code copy buttons) once the reply is complete.
+    beginBotBubble() {
+        document.getElementById('welcome').style.display = 'none';
+        const container = document.getElementById('messages');
+        container.style.display = 'flex';
+
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'msg bot';
+        msgDiv.style.animation = 'msgIn 0.4s ease';
+        const avatar = document.createElement('div');
+        avatar.className = 'msg-avatar';
+        avatar.textContent = '🤖';
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'msg-content';
+        contentDiv.innerHTML = '<span class="stream-cursor">▍</span>';
+        msgDiv.appendChild(avatar);
+        msgDiv.appendChild(contentDiv);
+        container.appendChild(msgDiv);
+        container.scrollTop = container.scrollHeight;
+
+        return {
+            update: (text) => {
+                contentDiv.innerHTML = MessageRenderer.format(text) + '<span class="stream-cursor">▍</span>';
+                container.scrollTop = container.scrollHeight;
+            },
+            remove: () => msgDiv.remove(),
+            finish: (finalText, finalOpts = {}) => {
+                msgDiv.remove();
+                MessageRenderer.appendToDOM('bot', finalText, false, finalOpts);
+            }
+        };
+    },
+
+    showTyping() {
+        if (document.getElementById('typing')) return;
+        const container = document.getElementById('messages');
+        const typing = document.createElement('div');
+        typing.id = 'typing';
+        typing.className = 'typing-indicator';
+        typing.innerHTML =
+            '<div class="msg-avatar" style="background:var(--bg-light);color:var(--primary-glow);border:1px solid var(--border)">🤖</div>' +
+            '<div class="typing-bubble"><span></span><span></span><span></span></div>';
+        container.appendChild(typing);
+        container.scrollTop = container.scrollHeight;
+    },
+
+    hideTyping() {
+        const typing = document.getElementById('typing');
+        if (typing) typing.remove();
+    }
+};
+
+const ClipboardUtil = {
+    async copy(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (e) { console.warn('[Clipboard] async copy failed, falling back', e); }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            const ok = document.execCommand('copy');
+            ta.remove();
+            return ok;
+        } catch (e) {
+            console.error('[Clipboard] fallback copy failed', e);
+            return false;
+        }
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 12. UI HELPERS (sidebar, resize)
+ * ------------------------------------------------------------------------- */
+const UI = {
+    toggleSidebar() {
+        document.getElementById('sidebar').classList.toggle('open');
+        document.getElementById('overlay').classList.toggle('show');
+    },
+    openSidebar() {
+        document.getElementById('sidebar').classList.add('open');
+        document.getElementById('overlay').classList.add('show');
+    },
+    closeSidebar() {
+        if (window.innerWidth <= 1024) {
+            document.getElementById('sidebar').classList.remove('open');
+            document.getElementById('overlay').classList.remove('show');
+        }
+    },
+    autoResize(textarea) {
+        textarea.style.height = 'auto';
+        textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+    },
+    createStars() {
+        const container = document.getElementById('stars');
+        const frag = document.createDocumentFragment();
+        for (let i = 0; i < 100; i++) {
+            const star = document.createElement('div');
+            star.className = 'star';
+            star.style.left = Math.random() * 100 + '%';
+            star.style.top = Math.random() * 100 + '%';
+            star.style.setProperty('--duration', (Math.random() * 3 + 2) + 's');
+            star.style.setProperty('--opacity', Math.random() * 0.5 + 0.3);
+            star.style.animationDelay = Math.random() * 5 + 's';
+            frag.appendChild(star);
+        }
+        container.appendChild(frag);
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 13. SETTINGS PANEL
+ * ------------------------------------------------------------------------- */
+const SettingsPanel = {
+    keyVisible: false,
+    async open() {
+        const models = await Vault.get('ab_model_ids', { flash: 'deepseek/deepseek-chat:free', pro: 'deepseek/deepseek-r1:free', image: 'google/gemini-2.5-flash-image:free' });
+        document.getElementById('modelFastInput').value = models.flash;
+        document.getElementById('modelProInput').value = models.pro;
+        document.getElementById('modelImageInput').value = models.image || 'google/gemini-2.5-flash-image:free';
+        document.getElementById('devNameLabel').textContent = 'Abdelrezak Bezzag';
+        const googleClientId = await Vault.get('ab_google_client_id', '');
+        document.getElementById('googleClientIdInput').value = googleClientId || '';
+        this.updateGoogleStatus(!!googleClientId);
+        Theme.apply();
+        I18n.apply();
+        ModalManager.open('settingsModal');
+    },
+    updateGoogleStatus(hasId) {
+        const el = document.getElementById('googleClientIdStatus');
+        if (!el) return;
+        el.innerHTML = hasId ? '<span class="badge ok">✓ محفوظ</span>' : '<span class="badge warn">غير مضبوط</span>';
+    },
+    async saveGoogleClientId() {
+        const value = document.getElementById('googleClientIdInput').value.trim();
+        await Vault.set('ab_google_client_id', value);
+        this.updateGoogleStatus(!!value);
+        Toast.show(value ? 'تم حفظ معرّف Google، أعد تحميل الصفحة لتفعيل الزر' : 'تم حذف معرّف Google', 'success');
+        if (value) {
+            GoogleAuth.clientId = value;
+            await GoogleAuth.loadScript();
+            GoogleAuth.render();
+            const l = document.getElementById('googleNotConfiguredHintLogin'); if (l) l.style.display = 'none';
+            const r = document.getElementById('googleNotConfiguredHintRegister'); if (r) r.style.display = 'none';
+        }
+    },
+    close() { ModalManager.close('settingsModal'); },
+    async saveModelIds() {
+        const flash = document.getElementById('modelFastInput').value.trim();
+        const pro = document.getElementById('modelProInput').value.trim();
+        const image = document.getElementById('modelImageInput').value.trim();
+        if (!flash || !pro) { Toast.show('أدخل معرّفي النموذجين', 'warning'); return; }
+        await Vault.set('ab_model_ids', { flash, pro, image: image || 'google/gemini-2.5-flash-image:free' });
+        Toast.show('تم حفظ معرّفات النماذج', 'success');
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 14. DASHBOARD (client-side analytics, no external services)
+ * ------------------------------------------------------------------------- */
+const Dashboard = {
+    open() {
+        this.render();
+        ModalManager.open('dashboardModal');
+    },
+    close() { ModalManager.close('dashboardModal'); },
+
+    render() {
+        const { chats } = AppStore.getState();
+        const body = document.getElementById('dashboardBody');
+
+        if (!chats.length) {
+            body.innerHTML = '<div class="empty-dashboard">لا توجد بيانات كافية بعد. ابدأ محادثة لرؤية إحصائياتك هنا.</div>';
+            return;
+        }
+
+        const totalChats = chats.length;
+        const allMessages = chats.flatMap((c) => c.messages);
+        const totalMessages = allMessages.length;
+        const userMessages = allMessages.filter((m) => m.role === 'user');
+        const botMessages = allMessages.filter((m) => m.role === 'bot');
+        const totalWords = allMessages.reduce((sum, m) => sum + m.content.trim().split(/\s+/).filter(Boolean).length, 0);
+        const avgWordsPerMsg = totalMessages ? Math.round(totalWords / totalMessages) : 0;
+
+        // messages per day for last 7 days
+        const days = [];
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            days.push(d);
+        }
+        const dayCounts = days.map((d) => {
+            const dayStr = d.toDateString();
+            return allMessages.filter((m) => m.ts && new Date(m.ts).toDateString() === dayStr).length;
+        });
+        const maxCount = Math.max(1, ...dayCounts);
+        const dayLabels = ['أحد', 'إثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'];
+
+        // top words (very small, ignores common stop words, min length 3)
+        const stop = new Set(['this','that','with','from','have','their','they','what','which','your','about','هذا','هذه','التي','الذي','على','إلى','عن','مع','كان','كانت','التي']);
+        const freq = {};
+        userMessages.forEach((m) => {
+            m.content.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).forEach((w) => {
+                if (w.length >= 3 && !stop.has(w)) freq[w] = (freq[w] || 0) + 1;
+            });
+        });
+        const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+        const barsHtml = dayCounts.map((count, i) => {
+            const heightPct = Math.round((count / maxCount) * 100);
+            return '<div class="bar-col">' +
+                '<span class="bar-value">' + count + '</span>' +
+                '<div class="bar" style="height:' + Math.max(heightPct, count > 0 ? 6 : 2) + '%"></div>' +
+                '<span class="bar-label">' + dayLabels[days[i].getDay()] + '</span>' +
+            '</div>';
+        }).join('');
+
+        const wordsHtml = topWords.length
+            ? topWords.map(([w, c]) => '<span class="word-tag">' + Sanitize.escapeHtml(w) + ' &middot; ' + c + '</span>').join('')
+            : '<span class="form-hint">لا توجد بيانات كافية بعد</span>';
+
+        body.innerHTML =
+            '<div class="dashboard-grid">' +
+                statCard(totalChats, 'محادثة') +
+                statCard(totalMessages, 'رسالة إجمالاً') +
+                statCard(userMessages.length, 'رسالة منك') +
+                statCard(botMessages.length, 'رد من المساعد') +
+                statCard(totalWords, 'كلمة مكتوبة') +
+                statCard(avgWordsPerMsg, 'متوسط كلمات/رسالة') +
+            '</div>' +
+            '<div class="chart-wrap">' +
+                '<div class="chart-title">نشاطك في آخر 7 أيام</div>' +
+                '<div class="bar-chart">' + barsHtml + '</div>' +
+            '</div>' +
+            '<div class="chart-wrap">' +
+                '<div class="chart-title">الكلمات الأكثر تكراراً في أسئلتك</div>' +
+                '<div class="word-tag-list">' + wordsHtml + '</div>' +
+            '</div>';
+
+        function statCard(value, label) {
+            return '<div class="stat-card"><div class="stat-value">' + value + '</div><div class="stat-label">' + label + '</div></div>';
+        }
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 15. SHORTCUTS MODAL + GLOBAL KEYBOARD SHORTCUTS
+ * ------------------------------------------------------------------------- */
+const Shortcuts = {
+    open() { ModalManager.open('shortcutsModal'); },
+    close() { ModalManager.close('shortcutsModal'); },
+    init() {
+        document.addEventListener('keydown', (e) => {
+            const tag = (e.target && e.target.tagName) || '';
+            const inField = tag === 'INPUT' || tag === 'TEXTAREA';
+            const ctrl = e.ctrlKey || e.metaKey;
+
+            if (e.key === 'Escape') {
+                if (ModalManager.anyOpen()) { ModalManager.closeTop(); e.preventDefault(); }
+                else if (document.getElementById('sidebar').classList.contains('open')) UI.closeSidebar();
+                return;
+            }
+
+            if (ctrl && e.key.toLowerCase() === 'k') { e.preventDefault(); ChatManager.focusSearch(); return; }
+            if (ctrl && e.key.toLowerCase() === 'n') { e.preventDefault(); ChatManager.newChat(); return; }
+            if (ctrl && e.key === ',') { e.preventDefault(); SettingsPanel.open(); return; }
+            if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); Dashboard.open(); return; }
+            if (ctrl && e.key.toLowerCase() === 'e') { e.preventDefault(); DataIO.exportJSON(); return; }
+            if (ctrl && e.key.toLowerCase() === 'j') { e.preventDefault(); Theme.toggle(); return; }
+            if (!inField && (e.key === '؟' || e.key === '?')) { e.preventDefault(); this.open(); return; }
+        });
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 16. DATA IMPORT / EXPORT
+ * ------------------------------------------------------------------------- */
+const DataIO = {
+    downloadBlob(content, filename, mime) {
+        const blob = new Blob([content], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+    },
+
+    exportJSON() {
+        const { chats, user } = AppStore.getState();
+        if (!chats.length) { Toast.show('لا توجد محادثات لتصديرها', 'warning'); return; }
+        const payload = { exportedAt: new Date().toISOString(), user: user ? user.name : null, chats };
+        this.downloadBlob(JSON.stringify(payload, null, 2), 'chats-export-' + Date.now() + '.json', 'application/json');
+        Toast.show('تم تصدير المحادثات (JSON)', 'success');
+    },
+
+    exportCSV() {
+        const { chats } = AppStore.getState();
+        if (!chats.length) { Toast.show('لا توجد محادثات لتصديرها', 'warning'); return; }
+        const rows = [['chat_id', 'chat_title', 'role', 'content', 'timestamp']];
+        chats.forEach((c) => {
+            c.messages.forEach((m) => {
+                rows.push([c.id, c.title, m.role, m.content, m.ts || '']);
+            });
+        });
+        const csv = rows.map((row) => row.map(csvEscape).join(',')).join('\r\n');
+        this.downloadBlob('\uFEFF' + csv, 'chats-export-' + Date.now() + '.csv', 'text/csv;charset=utf-8');
+        Toast.show('تم تصدير المحادثات (CSV)', 'success');
+
+        function csvEscape(val) {
+            const s = String(val ?? '');
+            if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+            return s;
+        }
+    },
+
+    handleImportFile(fileList) {
+        const file = fileList && fileList[0];
+        if (!file) return;
+        if (!file.name.toLowerCase().endsWith('.json')) {
+            Toast.show('الرجاء اختيار ملف JSON صالح', 'error');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => this.importJSON(reader.result);
+        reader.onerror = () => Toast.show('تعذّر قراءة الملف', 'error');
+        reader.readAsText(file);
+    },
+
+    async importJSON(text) {
+        await ErrorBoundary.wrap(async () => {
+            const parsed = JSON.parse(text);
+            const incoming = Array.isArray(parsed) ? parsed : parsed.chats;
+            if (!Array.isArray(incoming)) throw new Error('صيغة الملف غير صحيحة');
+
+            const valid = incoming.filter((c) => c && typeof c.title === 'string' && Array.isArray(c.messages));
+            if (!valid.length) { Toast.show('لم يتم العثور على محادثات صالحة في الملف', 'warning'); return; }
+
+            Confirm.ask(
+                'استيراد ' + valid.length + ' محادثة؟',
+                'ستُضاف هذه المحادثات إلى قائمتك الحالية دون حذف أي شيء موجود.',
+                async () => {
+                    const normalized = valid.map((c) => ({
+                        id: typeof c.id === 'number' ? c.id : Date.now() + Math.floor(Math.random() * 1000),
+                        title: String(c.title).substring(0, 80),
+                        messages: c.messages
+                            .filter((m) => m && (m.role === 'user' || m.role === 'bot') && typeof m.content === 'string')
+                            .map((m) => ({ role: m.role, content: m.content, ts: m.ts || new Date().toISOString() })),
+                        createdAt: c.createdAt || new Date().toISOString()
+                    }));
+                    const chats = [...normalized, ...AppStore.getState().chats];
+                    AppStore.setState({ chats });
+                    await ChatManager.saveChats();
+                    ChatManager.renderHistory();
+                    Toast.show('تم استيراد ' + normalized.length + ' محادثة بنجاح', 'success');
+                    SettingsPanel.close();
+                }
+            );
+        }, 'ملف الاستيراد غير صالح أو تالف.');
+    },
+
+    wipeAll() {
+        const user = AppStore.getState().user;
+        if (user) Vault.remove('ab_chats_' + user.id);
+        Vault.removeAllAppData();
+        AppStore.setState({ user: null, chats: [], currentChatId: null });
+        document.getElementById('app').classList.remove('active');
+        SettingsPanel.close();
+        Auth.showLogin();
+        Toast.show('تم حذف جميع البيانات من هذا الجهاز', 'success');
+    }
+};
+
+// drag & drop for the import zone
+(function setupDropZone() {
+    document.addEventListener('DOMContentLoaded', () => {
+        const zone = document.getElementById('importDrop');
+        if (!zone) return;
+        ['dragenter', 'dragover'].forEach((evt) => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.add('dragover'); }));
+        ['dragleave', 'drop'].forEach((evt) => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.remove('dragover'); }));
+        zone.addEventListener('drop', (e) => {
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (files && files.length) DataIO.handleImportFile(files);
+        });
+    });
+})();
+
+/* ---------------------------------------------------------------------------
+ * 17. PWA (manifest + service worker baseline + install prompt)
+ * ------------------------------------------------------------------------- */
+const PWA = {
+    deferredPrompt: null,
+
+    init() {
+        this.ensureManifestFallback();
+        this.registerServiceWorker();
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            this.deferredPrompt = e;
+            document.getElementById('installBtn').classList.add('show');
+        });
+        window.addEventListener('appinstalled', () => {
+            document.getElementById('installBtn').classList.remove('show');
+            this.deferredPrompt = null;
+            Toast.show('تم تثبيت التطبيق بنجاح', 'success');
+        });
+    },
+
+    // The real manifest is linked statically in <head> (./manifest.webmanifest,
+    // shipped alongside this file — see GUIDE-PLAY-STORE.md). A manifest
+    // injected at runtime as a blob: URL cannot be used by Bubblewrap/TWA
+    // packaging (it needs a stable, fetchable HTTP URL), so this only adds
+    // a minimal in-memory fallback for the rare case the static file 404s —
+    // it keeps "Add to Home Screen" working, but is NOT a substitute for
+    // deploying manifest.webmanifest for real (Play Store packaging needs it).
+    ensureManifestFallback() {
+        const existing = document.querySelector('link[rel="manifest"]');
+        if (!existing) return;
+        fetch(existing.href, { method: 'HEAD' }).then((res) => {
+            if (res.ok) return;
+            throw new Error('manifest missing');
+        }).catch(() => {
+            try {
+                const manifest = {
+                    name: 'abdelrezakbezzag - الذكاء الاصطناعي',
+                    short_name: 'abdelrezakbezzag',
+                    start_url: '.',
+                    display: 'standalone',
+                    background_color: '#0a0a1a',
+                    theme_color: '#0a0a1a',
+                    orientation: 'portrait-primary',
+                    icons: [{ src: document.getElementById('favicon').href, sizes: '100x100', type: 'image/svg+xml', purpose: 'any' }]
+                };
+                const blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+                existing.href = URL.createObjectURL(blob);
+                console.warn('[PWA] manifest.webmanifest was not found on the server — using an in-memory fallback. Deploy the real file for Play Store packaging.');
+            } catch (e) { /* best effort */ }
+        });
+    },
+
+    registerServiceWorker() {
+        if (!('serviceWorker' in navigator)) {
+            console.info('[PWA] Service workers are not supported in this browser.');
+            return;
+        }
+        // Registers the real, statically hosted ./sw.js (shipped alongside
+        // this file). A blob:-based worker cannot cache the app shell for a
+        // real offline TWA install, so this deployment ships an actual file.
+        navigator.serviceWorker.register('./sw.js').then(() => {
+            console.info('[PWA] Offline shell service worker registered.');
+        }).catch((err) => {
+            console.info('[PWA] Service worker registration failed (expected if sw.js was not deployed, or on a file:// origin):', err.message);
+        });
+    },
+
+    async promptInstall() {
+        if (!this.deferredPrompt) {
+            Toast.show('التثبيت متاح فقط عبر متصفح متوافق وبعد استضافة الملف على خادم HTTPS', 'info', 4200);
+            return;
+        }
+        this.deferredPrompt.prompt();
+        const choice = await this.deferredPrompt.userChoice;
+        this.deferredPrompt = null;
+        document.getElementById('installBtn').classList.remove('show');
+        if (choice && choice.outcome === 'accepted') Toast.show('جارٍ التثبيت...', 'success');
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * 18. APP BOOTSTRAP
+ * ------------------------------------------------------------------------- */
+const App = {
+    async enterApp() {
+        const user = AppStore.getState().user;
+        document.getElementById('loginPage').style.display = 'none';
+        document.getElementById('registerPage').style.display = 'none';
+        document.getElementById('app').classList.add('active');
+        document.getElementById('userName').textContent = user.name;
+        const avatarEl = document.getElementById('userAvatar');
+        if (user.picture) {
+            avatarEl.innerHTML = '<img src="' + Sanitize.escapeHtml(user.picture) + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover">';
+        } else {
+            avatarEl.textContent = user.name.charAt(0).toUpperCase();
+        }
+        ChatManager.syncToolbarUI();
+        await ChatManager.loadChats();
+    },
+
+    async init() {
+        ErrorBoundary.init();
+        UI.createStars();
+        await Theme.init();
+        await I18n.init();
+        Shortcuts.init();
+        PWA.init();
+        await GoogleAuth.init();
+        await Auth.tryRestoreSession();
+    }
+};
+
+document.addEventListener('DOMContentLoaded', () => { App.init(); });
+</script>
+</body>
+</html>
+<!--
+  ============================================================================
+  Created by Abdelrezak Bezzag — abdelrezakbezzag AI Workspace
+  ============================================================================
+-->
