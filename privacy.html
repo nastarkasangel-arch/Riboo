@@ -3,51 +3,71 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>سياسة الخصوصية — abdelrezakbezzag</title>
+<title>سياسة الخصوصية - abdelrezakbezzag</title>
+<meta name="robots" content="index,follow">
 <style>
-  body { font-family: 'Cairo', 'Segoe UI', Tahoma, sans-serif; background:#0a0a1a; color:#f8fafc; line-height:1.9; margin:0; padding:2rem 1.25rem 4rem; }
+  :root {
+    --bg: #0a0a1a; --surface: #13132a; --text: #f8fafc; --text-secondary: #94a3b8;
+    --primary: #818cf8; --border: rgba(148,163,184,0.15);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+    line-height: 1.9; padding: 2.5rem 1.25rem;
+  }
   .wrap { max-width: 760px; margin: 0 auto; }
-  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
-  .updated { color:#94a3b8; font-size:.9rem; margin-bottom:2rem; }
-  h2 { font-size: 1.15rem; margin-top: 2rem; color:#a5b4fc; }
-  p, li { color:#cbd5e1; }
-  a { color:#818cf8; }
+  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+  .updated { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 2rem; }
+  h2 { font-size: 1.1rem; color: var(--primary); margin: 2rem 0 0.6rem; }
+  p, li { color: #e2e8f0; font-size: 0.95rem; }
   ul { padding-inline-start: 1.4rem; }
-  .badge { display:inline-block; background:rgba(99,102,241,.15); border:1px solid rgba(99,102,241,.4); color:#a5b4fc; border-radius:999px; padding:.2rem .8rem; font-size:.85rem; margin-bottom:1rem; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem 1.75rem; }
+  a { color: var(--primary); }
+  .back { display: inline-block; margin-bottom: 1.5rem; color: var(--text-secondary); text-decoration: none; font-size: 0.9rem; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <span class="badge">abdelrezakbezzag — الذكاء الاصطناعي</span>
+  <a class="back" href="./index.html">‹ رجوع إلى التطبيق</a>
   <h1>سياسة الخصوصية</h1>
-  <p class="updated">آخر تحديث: يُرجى تحديث هذا التاريخ يدوياً عند كل تعديل جوهري لهذه السياسة.</p>
+  <div class="updated">آخر تحديث: 2026</div>
 
-  <p>هذا التطبيق ("التطبيق") من تطوير عبد الرزاق بزّاق. توضح هذه الصفحة ما يجمعه التطبيق من بيانات، وكيف يُعالجها، ومن يشاركها.</p>
+  <div class="card">
+    <p>يحترم تطبيق <strong>abdelrezakbezzag</strong> خصوصيتك. هذه الصفحة تشرح بوضوح ما الذي يُجمع، وما الذي لا يُجمع، وكيف تُعالج بياناتك.</p>
 
-  <h2>1. البيانات التي تبقى على جهازك فقط</h2>
-  <p>حساب المستخدم، سجلّ المحادثات، والإعدادات تُخزَّن محلياً في متصفحك (localStorage) داخل خزنة مشفّرة بمفتاح AES-256-GCM. لا يملك مطوّر التطبيق أي خادم يخزّن هذه البيانات، ولا يمكنه الوصول إليها عن بُعد. حذف بيانات المتصفح أو استخدام "مسح كل البيانات" من الإعدادات يحذفها نهائياً بلا إمكانية استرجاع.</p>
+    <h2>1. لا يوجد خادم يُخزّن بياناتك</h2>
+    <ul>
+      <li>هذا التطبيق لا يملك قاعدة بيانات خاصة به. حسابك، محادثاتك، وإعداداتك تُخزَّن محلياً فقط داخل متصفحك (Local Storage)، مشفّرة على هذا الجهاز.</li>
+      <li>إن مسحت بيانات المتصفح، أو استخدمت جهازاً/متصفحاً آخر، فلن تجد محادثاتك — لأنها لم تُرسَل لأي خادم من الأساس.</li>
+      <li>يمكنك حذف كل بياناتك نهائياً من هذا الجهاز في أي وقت عبر الإعدادات ← "حذف كل البيانات".</li>
+    </ul>
 
-  <h2>2. البيانات التي تُرسَل لمزوّد الذكاء الاصطناعي</h2>
-  <p>عندما ترسل رسالة أو تطلب توليد صورة، يُرسَل نصّ رسالتك (وأي صورة أو ملف ترفقه) إلى خادم التطبيق، الذي يمرّرها بدوره إلى OpenRouter (<a href="https://openrouter.ai" target="_blank" rel="noopener">openrouter.ai</a>) لتوليد الرد. OpenRouter طرف ثالث مستقل له سياسة خصوصية خاصة به. لا يُرسَل اسمك الحقيقي أو بريدك الإلكتروني مع هذه الطلبات — فقط محتوى المحادثة اللازم لتوليد الرد.</p>
+    <h2>2. معالجة الرسائل لتوليد الردود</h2>
+    <ul>
+      <li>عند إرسال رسالة، يُرسَل نصّها عبر خادم وسيط تابع للتطبيق (Serverless Function) إلى مزوّد الذكاء الاصطناعي <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> فقط لغرض توليد الرد.</li>
+      <li>الخادم الوسيط لا يخزّن رسائلك؛ دوره الوحيد تمرير الطلب وإرفاق مفتاح API الخاص بالتطبيق (المحفوظ بأمان في متغيرات البيئة على الاستضافة، وليس في المتصفح).</li>
+      <li>معالجة OpenRouter لهذه الطلبات تخضع لسياسة الخصوصية الخاصة بها.</li>
+    </ul>
 
-  <h2>3. تسجيل الدخول</h2>
-  <p>إذا استخدمت تسجيل الدخول عبر Google، فإن Google تزوّد التطبيق بالاسم والبريد الإلكتروني وصورة الحساب العامة فقط، لغرض عرضها داخل واجهة التطبيق. هذه البيانات تُخزَّن محلياً كما في القسم 1 ولا تُرسَل لأي خادم تابع للمطوّر.</p>
+    <h2>3. تسجيل الدخول عبر Google (اختياري)</h2>
+    <ul>
+      <li>إن اخترت تسجيل الدخول بحساب Google، يزوّدنا Google بالاسم والبريد الإلكتروني وصورة الحساب فقط لإنشاء جلستك المحلية — دون أي خادم خارجي يستقبلها.</li>
+      <li>بديل البريد وكلمة المرور متاح دائماً دون الحاجة لحساب Google.</li>
+    </ul>
 
-  <h2>4. ملفات تعريف الارتباط والتتبّع</h2>
-  <p>لا يستخدم التطبيق إعلانات، ولا شبكات تتبّع أو تحليلات طرف ثالث (مثل Google Analytics). لوحة "التحليلات" داخل التطبيق تُحسب بالكامل من بياناتك المحلية ولا تُرسَل لأي مكان.</p>
+    <h2>4. لا إعلانات ولا تتبّع</h2>
+    <p>لا يحتوي التطبيق على إعلانات، ولا على أدوات تتبّع أو تحليلات تُرسِل نشاطك لأي طرف ثالث لأغراض تسويقية.</p>
 
-  <h2>5. حقوقك</h2>
-  <ul>
-    <li>حذف جميع بياناتك المحلية في أي وقت من الإعدادات ← "مسح كل البيانات".</li>
-    <li>تصدير محادثاتك بصيغة JSON/CSV من نفس القائمة.</li>
-    <li>التوقف عن الاستخدام في أي وقت دون أي التزام.</li>
-  </ul>
+    <h2>5. خصوصية الأطفال</h2>
+    <p>هذا التطبيق غير موجَّه للأطفال دون 13 سنة، ولا يجمع بيانات عنهم عن قصد.</p>
 
-  <h2>6. الأطفال</h2>
-  <p>التطبيق غير موجّه للأطفال دون 13 سنة، ولا يجمع عمداً بيانات منهم.</p>
+    <h2>6. تعديلات على هذه السياسة</h2>
+    <p>قد تُحدَّث هذه الصفحة من وقت لآخر. أي تغيير جوهري سيظهر هنا مع تاريخ التحديث أعلاه.</p>
 
-  <h2>7. التواصل</h2>
-  <p>لأي استفسار حول هذه السياسة، يمكن التواصل مع المطوّر عبر البريد الإلكتروني أو القناة المذكورة في صفحة التطبيق على المتجر. (يُرجى استبدال هذا السطر ببيانات تواصل حقيقية قبل النشر.)</p>
+    <h2>7. التواصل</h2>
+    <p>لأي استفسار حول الخصوصية، تواصل مع المطوّر: Abdelrezak Bezzag.</p>
+  </div>
 </div>
 </body>
 </html>

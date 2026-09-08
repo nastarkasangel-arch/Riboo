@@ -1,101 +1,122 @@
+// ============================================================================
 // api/generateTextOpenRouter.js
-// The ONLY AI backend function this app calls. Deploy as a Vercel
-// serverless function at this exact path. Reads OPENROUTER_API_KEY from
-// Vercel's Environment Variables — never hardcode a key here or anywhere
-// else in this file; a key committed to a repo (public or private) must be
-// treated as already leaked and revoked.
+// The ONLY server-side function this app calls. Deploy it to Vercel next to
+// index.html (in an /api folder at the project root — Vercel auto-detects
+// this as a Serverless/Edge Function, no extra config needed).
 //
-// Handles three shapes of the same underlying call, all sent by the client
-// as a JSON POST body:
-//   - { model, messages, stream: false }                 -> plain chat reply
-//   - { model, messages, stream: true }                  -> streamed (SSE) reply
-//   - { model, messages, modalities: ['image','text'] }  -> image generation
+// It receives the exact OpenAI/OpenRouter-style body the front-end builds
+// (model, messages[], stream, temperature, top_p, max_tokens, modalities),
+// attaches the real API key from Vercel's Environment Variables, and pipes
+// the OpenRouter response straight back — including token-by-token SSE
+// streaming when `stream: true`.
 //
-// This one function is intentionally kept thin: it forwards the body almost
-// as-is to OpenRouter's OpenAI-compatible endpoint and streams the response
-// straight back, so the client's expectations (OpenAI-style `choices[0]`
-// shape) match what OpenRouter actually returns.
+// Setup on Vercel (do this once per project):
+//   1. Project → Settings → Environment Variables
+//   2. Add OPENROUTER_API_KEY = <your key from https://openrouter.ai/keys>
+//   3. Apply it to Production (and Preview/Development if you use them)
+//   4. Redeploy
+//
+// The browser NEVER sees this key — only this function reads it, and only
+// on the server. That's what keeps it safe from dev-tools inspection.
+// ============================================================================
 
-export default async function handler(req, res) {
+export const config = { runtime: 'edge' };
+
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+function jsonError(message, status) {
+  return new Response(
+    JSON.stringify({ error: { message, code: status } }),
+    { status, headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+export default async function handler(req) {
+  if (req.method === 'OPTIONS') {
+    // Same-origin only in normal use, but this keeps preflight harmless.
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
+      }
+    });
+  }
+
   if (req.method !== 'POST') {
-    res.status(405).json({ error: { message: 'Method not allowed' } });
-    return;
+    return jsonError('Method not allowed — use POST.', 405);
   }
 
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    res.status(500).json({ error: { message: 'OPENROUTER_API_KEY غير مضبوط على الخادم (Vercel → Project Settings → Environment Variables).' } });
-    return;
+    // This is the #1 cause of a broken deploy: the key was never added to
+    // Vercel's Environment Variables (or the project wasn't redeployed
+    // after adding it).
+    return jsonError(
+      'OPENROUTER_API_KEY غير مضبوط على الخادم. أضِفه في Vercel → Settings → Environment Variables ثم أعِد النشر (Redeploy).',
+      500
+    );
   }
 
-  const { model, messages, stream, modalities, temperature, top_p, max_tokens } = req.body || {};
-  if (!model || !Array.isArray(messages)) {
-    res.status(400).json({ error: { message: 'الطلب ناقص: model و messages مطلوبان.' } });
-    return;
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return jsonError('طلب غير صالح: الجسم ليس JSON سليماً.', 400);
   }
 
-  const upstreamBody = {
-    model,
-    messages,
-    stream: !!stream,
-    ...(modalities ? { modalities } : {}),
-    ...(temperature !== undefined ? { temperature } : {}),
-    ...(top_p !== undefined ? { top_p } : {}),
-    ...(max_tokens !== undefined ? { max_tokens } : {})
+  if (!body || typeof body.model !== 'string' || !Array.isArray(body.messages)) {
+    return jsonError('الطلب يجب أن يحتوي على model (نص) و messages (مصفوفة).', 400);
+  }
+
+  // Only forward the fields OpenRouter's chat/completions endpoint expects.
+  // Keeps the upstream call predictable regardless of what the client sends.
+  const payload = {
+    model: body.model,
+    messages: body.messages,
+    stream: !!body.stream
   };
+  if (typeof body.temperature === 'number') payload.temperature = body.temperature;
+  if (typeof body.top_p === 'number') payload.top_p = body.top_p;
+  if (typeof body.max_tokens === 'number') payload.max_tokens = body.max_tokens;
+  if (Array.isArray(body.modalities)) payload.modalities = body.modalities;
 
   let upstream;
   try {
-    upstream = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    upstream = await fetch(OPENROUTER_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        // Optional but recommended by OpenRouter for analytics/rate-limit
-        // attribution — replace with your real deployed domain and app name.
-        'HTTP-Referer': process.env.PUBLIC_SITE_URL || 'https://example.com',
-        'X-Title': 'abdelrezakbezzag'
+        'Authorization': 'Bearer ' + apiKey,
+        // Optional but recommended by OpenRouter for analytics/rate-limit context.
+        'HTTP-Referer': req.headers.get('origin') || 'https://vercel.app',
+        'X-Title': 'abdelrezakbezzag AI Workspace'
       },
-      body: JSON.stringify(upstreamBody)
+      body: JSON.stringify(payload)
     });
-  } catch (err) {
-    res.status(502).json({ error: { message: 'تعذّر الوصول إلى OpenRouter: ' + err.message } });
-    return;
+  } catch (e) {
+    return jsonError('تعذّر الوصول إلى OpenRouter (مشكلة شبكة على الخادم). حاول مجدداً.', 502);
   }
 
-  if (!upstream.ok) {
-    let message = `خطأ من OpenRouter (رمز ${upstream.status})`;
-    try {
-      const errBody = await upstream.json();
-      if (errBody && errBody.error && errBody.error.message) message = errBody.error.message;
-    } catch (e) { /* not JSON */ }
-    res.status(upstream.status).json({ error: { message } });
-    return;
+  // Non-streaming error responses: relay OpenRouter's own JSON error as-is
+  // so the front-end's existing error-parsing logic keeps working unchanged.
+  if (!upstream.ok && !payload.stream) {
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: { 'Content-Type': upstream.headers.get('Content-Type') || 'application/json' }
+    });
   }
 
-  if (stream) {
-    // Pipe the SSE stream straight through, unmodified — the client already
-    // parses OpenAI-style "data: {...}" lines.
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    const reader = upstream.body.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
-      }
-    } finally {
-      res.end();
+  // Success (streaming or not) and streaming errors: pipe the body straight
+  // through. For `stream: true` this forwards OpenRouter's SSE chunks live,
+  // which is what lets the front-end render the reply token-by-token.
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      'Content-Type': upstream.headers.get('Content-Type') || 'application/json',
+      'Cache-Control': 'no-cache'
     }
-    return;
-  }
-
-  const data = await upstream.json();
-  res.status(200).json(data);
+  });
 }
-
-export const config = {
-  api: { bodyParser: { sizeLimit: '15mb' } } // room for base64 image/PDF attachments
-};

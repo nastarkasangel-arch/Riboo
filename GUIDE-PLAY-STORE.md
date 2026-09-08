@@ -1,88 +1,50 @@
-# الدليل الكامل: النشر → Google Play (TWA) → Uptodown
+# دليل النشر والتغليف — abdelrezakbezzag
 
-## 1. رفع الملفات على Vercel
+## 1) نشر الموقع على Vercel
 
-بنية المجلد يجب أن تكون هكذا بالضبط:
+1. ارفع كل محتوى هذا المجلد (بما فيه المجلدين `api/` و `icons/`) إلى مستودع GitHub.
+2. على [vercel.com](https://vercel.com) → **Add New Project** → اختر المستودع → **Deploy**
+   (لا حاجة لأي إعداد بناء خاص، الملفات ثابتة + دالة واحدة في `api/`).
+3. بعد أول نشر: **Project → Settings → Environment Variables**
+   - Name: `OPENROUTER_API_KEY`
+   - Value: مفتاحك من [openrouter.ai/keys](https://openrouter.ai/keys)
+   - طبّقه على Production (وPreview إن رغبت)
+4. **Deployments → أعد النشر (Redeploy)** حتى يقرأ المتغيّر الجديد.
+5. افتح الرابط النهائي وجرّب إرسال رسالة — يجب أن يصلك رد فعلي بدون أي خطأ.
 
-```
-/index.html                          (الملف الرئيسي المعدَّل)
-/manifest.webmanifest
-/sw.js
-/privacy.html
-/vercel.json
-/icons/icon-72.png
-/icons/icon-96.png
-/icons/icon-128.png
-/icons/icon-144.png
-/icons/icon-152.png
-/icons/icon-180.png
-/icons/icon-192.png
-/icons/icon-192-maskable.png
-/icons/icon-512.png
-/icons/icon-512-maskable.png
-/api/generateTextOpenRouter.js
-```
+⚠️ لا تكتب المفتاح أبداً داخل `index.html` أو أي ملف يُرفع لـ Git — فقط في Environment Variables.
 
-خطوات:
-1. أنشئ مجلد `icons/` وضع فيه كل ملفات `icon-*.png` المرفقة.
-2. تأكد أن `api/generateTextOpenRouter.js` موجود فعلاً بهذا المسار (Vercel يكتشف أي ملف داخل `api/` كـ Serverless Function تلقائياً).
-3. فـ Vercel Project Settings → Environment Variables، أضف:
-   - `OPENROUTER_API_KEY` = مفتاحك من https://openrouter.ai/keys
-   - (اختياري) `PUBLIC_SITE_URL` = رابط موقعك بعد النشر (مثلاً `https://yourapp.vercel.app`)
-4. اعمل Deploy / Redeploy.
-5. افتح الموقع، تأكد أن الدردشة تشتغل، وأن `https://yourapp.vercel.app/manifest.webmanifest` يفتح كملف JSON صحيح (ماشي 404).
-6. افتح `https://yourapp.vercel.app/privacy.html` وعدّل فيه بريد/قناة تواصل حقيقية قبل ما تكمّل.
+## 2) التأكد أن التطبيق PWA حقيقي
 
-**هام:** بدّل عنوان `privacy.html` من placeholder إلى معلومات تواصل حقيقية — Google Play يرفض التطبيق إذا كانت سياسة الخصوصية فارغة أو غير جدّية.
+بعد النشر، افتح الموقع بـ Chrome على الهاتف → قائمة المتصفح ⋮ → **"إضافة إلى الشاشة الرئيسية" / Install app**.
+إن ظهر الخيار ولم يظهر أي تحذير في Lighthouse (DevTools → Lighthouse → PWA)، فالتطبيق جاهز للتغليف.
 
-## 2. تحويل الموقع إلى تطبيق Android (TWA) عبر Bubblewrap
+الملفات المطلوبة لذلك موجودة كلها في هذا التسليم:
+`manifest.webmanifest`, `sw.js`, `icons/icon-192.png`, `icons/icon-512.png`, `icons/icon-512-maskable.png`.
 
-هذه الخطوات تُنفَّذ على الكمبيوتر ديالك (ماشي هنا فـ المحادثة)، وتحتاج Node.js مثبّت.
+## 3) تغليف التطبيق لمتجر Google Play (TWA)
 
-```bash
-npm install -g @bubblewrap/cli
-bubblewrap init --manifest https://yourapp.vercel.app/manifest.webmanifest
-```
+أسهل طريقة بدون Android Studio: [PWABuilder.com](https://www.pwabuilder.com)
 
-الأداة غادي تسولك:
-- Application ID (مثلاً `com.abdelrezakbezzag.app`)
-- اسم التطبيق، الألوان (غادي تجيب أغلبها تلقائياً من المانيفست)
+1. أدخل رابط موقعك المنشور على Vercel.
+2. اضغط **Start** ثم من تبويب **Android** اختر **Generate Package**.
+3. حمّل ملف `.aab` الناتج (Android App Bundle).
+4. على [Google Play Console](https://play.google.com/console) (يتطلب حساب مطوّر برسوم لمرة واحدة):
+   - أنشئ تطبيقاً جديداً
+   - ارفع ملف `.aab`
+   - أضف رابط سياسة الخصوصية: `https://YOUR-DOMAIN.vercel.app/privacy.html`
+   - أضف أيقونة 512×512 (موجودة في `icons/icon-512.png`) ولقطات شاشة، ثم أرسل للمراجعة.
 
-بعدها:
-```bash
-bubblewrap build
-```
+بديل أكثر تحكماً: أداة [Bubblewrap CLI](https://github.com/GoogleChromeLabs/bubblewrap) الرسمية من Google (تحتاج Node.js وJDK).
 
-هذا كيعطيك ملفين:
-- `app-release-signed.apk` — للتجربة المباشرة أو Uptodown
-- `app-release-bundle.aab` — هذا لي كيتقبل فـ Google Play
+## 4) رفع على Uptodown
 
-⚠️ Bubblewrap كيولّد مفتاح توقيع (`android.keystore`) — احتفظ بيه فمكان آمن، إلا ضاع ما تقدرش تحدّث التطبيق فـ Play Console مستقبلاً بنفس Application ID.
+Uptodown يقبل ملفات APK مباشرة (وليس AAB). من نفس مشروع PWABuilder اختر تصدير **APK** بدل AAB
+(أو حوّل الـ AAB لـ APK عبر `bundletool`)، ثم ارفعه من حساب مطوّر على Uptodown مع نفس رابط سياسة الخصوصية.
 
-## 3. ربط التطبيق بالموقع (Digital Asset Links)
+## 5) قائمة تحقق سريعة قبل الإرسال لأي متجر
 
-باش Android يفهم أن التطبيق هو "نفس" الموقع (ويخبي شريط عنوان المتصفح)، خاصك:
-
-1. بعد `bubblewrap build`، الأداة كتولّد ملف `assetlinks.json`.
-2. حطّو فـ الموقع على المسار بالضبط: `https://yourapp.vercel.app/.well-known/assetlinks.json`
-3. تأكد أن `vercel.json` المرفق يحتوي على قاعدة الـ Content-Type ديال هذا المسار (موجودة أصلاً فالملف لي جهّزتلك).
-
-## 4. حساب Google Play Developer
-
-- سجّل فـ https://play.google.com/console (رسم 25$ لمرة وحدة، مدى الحياة).
-- أنشئ تطبيقاً جديداً، عبّي:
-  - Store listing (وصف، صور شاشة، أيقونة 512×512 — عندك `icon-512.png`)
-  - Data Safety: اربط `privacy.html` كرابط سياسة الخصوصية
-  - ارفع ملف `.aab`
-- التطبيق كيدخل فمراجعة Google (يومين لأسبوع عادةً) قبل ما يبان للعموم.
-
-## 5. Uptodown
-
-Uptodown أبسط: كيقبلوا ملف `.apk` مباشرة بدون حساب مطوّر مدفوع.
-1. سجّل حساب مطوّر مجاني فـ https://developer.uptodown.com
-2. ارفع `app-release-signed.apk`
-3. عبّي الوصف وصور الشاشة، وانتظر مراجعتهم (عادة أسرع من Google).
-
-## 6. ملاحظة صادقة حول "حجم الملف"
-
-حجم `index.html` كبر لأنه دابا كيحتوي فعلياً على: PWA حقيقية (manifest + service worker + أيقونات)، CSP، صفحة خصوصية منفصلة، ودالة خادم واحدة نظيفة لـ OpenRouter بدل ثلاثة. ماكاينش أي كود فارغ تزاد غير باش يكبر الحجم — هذا كيفما تفاهمنا.
+- [ ] `OPENROUTER_API_KEY` مضبوط على Vercel والدردشة تعمل فعلياً على الرابط المنشور
+- [ ] `/manifest.webmanifest` و `/sw.js` و `/privacy.html` كلها تفتح بدون 404
+- [ ] Lighthouse → PWA لا يُظهر أخطاء حرجة
+- [ ] رابط سياسة الخصوصية صحيح ومحدَّث باسم نطاقك الفعلي

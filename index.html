@@ -6,8 +6,10 @@
   Single-file production build: HTML + CSS + JS.
   Architecture: custom pub/sub state store, AES-GCM local-storage vault,
   toast/notification system, keyboard shortcuts, live search, analytics
-  dashboard, JSON/CSV import-export, PWA baseline (manifest + service worker
-  registered from an in-memory Blob), and a global error boundary.
+  dashboard, JSON/CSV import-export, a real installable PWA (static
+  manifest.webmanifest + sw.js + PNG icon set, shipped alongside this file —
+  see GUIDE-PLAY-STORE.md), a Content-Security-Policy meta tag, a standalone
+  privacy.html page, and a global error boundary.
 
   Honest engineering notes (read before deploying):
   1. This app authenticates users entirely in the browser (localStorage).
@@ -28,27 +30,25 @@
      that is never persisted).
   3. Calling a third-party generative AI API directly from client-side code
      means any API key embedded in this file is extractable by anyone who
-     opens dev tools. This build deliberately ships with NO embedded key.
-     Instead, each user enters their own key in Settings; it is stored
-     only in their own encrypted local vault and sent only to the model
-     provider's endpoint. For real production use, proxy the request
-     through your own backend so the key never reaches the browser.
-  4. Three-tier provider chain: when the primary provider (Gemini, via
-     /api/generateText) returns a quota/rate-limit/server error, the client
-     retries through /api/generateTextFallback (DeepSeek), then
-     /api/generateTextOpenRouter (OpenRouter) — each tried only if the
-     previous one fails with a retryable error. All three are separate
-     Vercel serverless functions, each reading its own key from Vercel's
-     Environment Variables (GEMINI_API_KEY / DEEPSEEK_API_KEY /
-     OPENROUTER_API_KEY) — never from client code. See api/generateText.js,
-     api/generateTextFallback.js and api/generateTextOpenRouter.js (shipped
-     alongside this file, not inside it) and the setup notes near
-     AI_PROXY_URL below. Web-search grounding is Gemini-only, so it is
-     skipped automatically once the chain falls back. Every tier is
-     optional: skip a key and that tier is simply skipped at runtime.
-     (DeepAI was tried as a tier and removed by request — see git history
-     if you ever want it back; api/generateTextDeepAI.js is no longer
-     referenced anywhere in this file.)
+     opens dev tools. This build deliberately ships with NO embedded key
+     and does NOT ask the user for one either: every request goes through
+     this app's own serverless proxy (api/generateTextOpenRouter.js), and
+     only that server-side function ever sees the real OPENROUTER_API_KEY,
+     read from Vercel's Environment Variables. The browser never holds it.
+  4. Single-provider architecture: every text reply goes through ONE
+     serverless function, api/generateTextOpenRouter.js, which calls
+     OpenRouter (https://openrouter.ai). OpenRouter is itself a router in
+     front of dozens of underlying models, so this is not a step down from
+     the old multi-provider chain — model choice still lives in Settings,
+     it is just expressed as an OpenRouter model id (e.g.
+     "deepseek/deepseek-chat:free"). The function reads its key from
+     Vercel's Environment Variables (OPENROUTER_API_KEY) — never from
+     client code. See the setup notes near AI_PROXY_URL below.
+     Reliability without a second provider: the client streams the reply
+     first, and on a retryable failure (429 / 5xx) retries the same
+     endpoint with a short backoff before giving up — see
+     ChatManager.requestText() and ChatManager._withRetry(). No
+     Gemini/DeepSeek code paths remain in this file.
   5. "Stop generating": while a reply is streaming or loading, the send
      button turns into a stop button (`ChatManager.stopGenerating()`) that
      aborts the in-flight request via AbortController instead of leaving
@@ -64,6 +64,21 @@
 <meta name="description" content="مساحة عمل ذكاء اصطناعي شخصية — محادثة، لوحة تحليلات، واستيراد وتصدير بياناتك.">
 <meta name="developer" content="Abdelrezak Bezzag (abdelrekbezzag)">
 <title>abdelrezakbezzag - الذكاء الاصطناعي</title>
+<!--
+  ملاحظة نشر مهمة: الوسوم أدناه (manifest / apple-touch-icon) تشير لملفات
+  حقيقية (manifest.webmanifest, /icons/icon-*.png) يجب رفعها بجانب هذا
+  الملف على نفس الدومين. هذه الملفات مرفقة معك في نفس التسليم. بدونها
+  تبقى الوسوم صامتة (404 غير قاتل) والتطبيق يشتغل عادي، لكن التثبيت
+  كـ PWA حقيقية والتغليف كـ TWA لـ Google Play يحتاجانها فعلياً — شوف
+  GUIDE-PLAY-STORE.md.
+-->
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-180.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="abdelrezakbezzag">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://openrouter.ai https://accounts.google.com; frame-src https://accounts.google.com; base-uri 'self'; form-action 'self'; object-src 'none'">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -1082,7 +1097,7 @@
             <div class="settings-section">
                 <h4 data-i18n="settings.tools.title">أدوات المحادثة</h4>
                 <div class="settings-row-desc">
-                    ميزتا "البحث في الويب" و"توليد صورة" تعملان تلقائياً عبر خادم التطبيق — لا حاجة لأي مفتاح على هذا الجهاز. توليد الصور يتطلّب أن يكون مفتاح الخادم مفعّلاً على نموذج توليد صور (Imagen).
+                    ميزتا "البحث في الويب" و"توليد صورة" تعملان تلقائياً عبر خادم التطبيق (OpenRouter) — لا حاجة لأي مفتاح على هذا الجهاز. توليد الصور يتطلّب اختيار معرّف نموذج يدعم إخراج الصور على OpenRouter.
                 </div>
             </div>
 
@@ -1147,7 +1162,14 @@
             <div class="settings-section">
                 <h4 data-i18n="settings.about.title">حول التطبيق</h4>
                 <div class="settings-row-desc">
-                    الإصدار 2.0.0 &middot; تم التطوير بواسطة <strong id="devNameLabel">Abdelrezak Bezzag</strong>
+                    الإصدار 2.1.0 &middot; تم التطوير بواسطة <strong id="devNameLabel">Abdelrezak Bezzag</strong>
+                </div>
+                <div class="settings-row" style="margin-top:0.9rem">
+                    <div>
+                        <div class="settings-row-label">سياسة الخصوصية</div>
+                        <div class="settings-row-desc">ما الذي يجمعه التطبيق وكيف يُستخدم</div>
+                    </div>
+                    <a class="btn btn-ghost btn-sm" style="width:auto;text-decoration:none;display:inline-flex;align-items:center;justify-content:center" href="./privacy.html" target="_blank" rel="noopener">فتح</a>
                 </div>
             </div>
         </div>
@@ -1234,35 +1256,31 @@ Object.defineProperty(window, 'developer', { get() { return DEVELOPER_INFO; } })
 /* ---------------------------------------------------------------------------
  * 0.1 AI PROXY CONFIG
  * ----------------------------------------------------------------------------
- * الموقع الآن مرفوع على Vercel مع الملف نفسه، والـ Functions (api/generateText.js
- * و api/generateImage.js) فنفس المشروع — فهذا خلّي الرابط فارغ '' كافي، لأن
- * الطلبات تمشي لنفس الدومين مباشرة (/api/generateText). المفتاح الحقيقي ماكاش
- * هنا، هو محفوظ فقط فـ Vercel Environment Variables (GEMINI_API_KEY).
+ * الموقع مرفوع على Vercel مع الملف نفسه، والـ Function الوحيدة
+ * (api/generateTextOpenRouter.js) فـ نفس المشروع — فهذا خلّي الرابط فارغ ''
+ * كافي، لأن الطلبات تمشي لنفس الدومين مباشرة (/api/generateTextOpenRouter).
+ * المفتاح الحقيقي ماكاش هنا، هو محفوظ فقط فـ Vercel Environment Variables
+ * باسم OPENROUTER_API_KEY (مفتاحك من openrouter.ai، وليس هنا أبداً).
  *
- * مزوّد احتياطي أول (DeepSeek): أضِف ملف api/generateTextFallback.js لنفس
- * مشروع Vercel، وأضِف متغيّر بيئة اسمه DEEPSEEK_API_KEY في إعدادات المشروع
- * (Project Settings → Environment Variables) — وليس هنا أبداً.
- *
- * مزوّد احتياطي ثانٍ (OpenRouter): أضِف ملف api/generateTextOpenRouter.js
- * لنفس المشروع، وأضِف متغيّر بيئة اسمه OPENROUTER_API_KEY (مفتاحك من
- * openrouter.ai، وليس هنا أبداً). النموذج الافتراضي المستعمل هو
- * "deepseek/deepseek-chat:free"، ويمكن تغييره من داخل نفس الملف.
+ * مزوّد واحد فقط (OpenRouter): كل الطلبات — دردشة، بث مباشر، بحث في الويب،
+ * وتوليد الصور — تمرّ عبر نفس الـ Function، وتختار فقط "معرّف النموذج"
+ * (model id) من إعدادات التطبيق. النماذج الافتراضية:
+ * "deepseek/deepseek-chat:free" (سريع) و"deepseek/deepseek-r1:free" (متقدم)
+ * — كلاهما مجاني على OpenRouter، ويمكن تغييرهما لأي نموذج آخر متوفر هناك
+ * من نفس صفحة الإعدادات، دون لمس الكود.
  *
  * ⚠️ تنبيه أمان: أي مفتاح API تكتبه مباشرة داخل كود JavaScript فـ المتصفح
  * أو تحطّه فـ ملف كيتّرفع لـ GitHub يصير مكشوفاً لأي شخص يشوف الكود —
  * حتى لو الـ repo خاص، أو لو غادي يولّي عام يوماً من الأيام. GitHub
- * نفسه كيسكان المفاتيح المعروفة وكيبلّغ عليها. المفتاح لي بعثتيه فـ
- * محادثة سابقة يُعتبر مكشوفاً بمجرد ما كتبتيه، حتى لو ماستعملتوش —
- * روح ألغيه (revoke) من لوحة تحكم OpenRouter وأنشئ مفتاحاً جديداً، وحطّه
- * غير فـ Environment Variables (Vercel محلياً وفـ الإنتاج)، عمرك متكتبو
- * فـ ملف كيدخل لـ git.
+ * نفسه كيسكان المفاتيح المعروفة وكيبلّغ عليها. أي مفتاح كتبتيه فـ محادثة
+ * سابقة يُعتبر مكشوفاً بمجرد ما كتبتيه، حتى لو ماستعملتوش — روح ألغيه
+ * (revoke) من لوحة تحكم OpenRouter وأنشئ مفتاحاً جديداً، وحطّه غير فـ
+ * Environment Variables (Vercel محلياً وفـ الإنتاج)، عمرك متكتبو فـ ملف
+ * كيدخل لـ git.
  *
- * إذا فشل Gemini، ثم DeepSeek، كل واحد بخطأ قابل لإعادة المحاولة (حصة/تحميل
- * زائد)، يجرّب التطبيق OpenRouter تلقائياً كملاذ أخير قبل إظهار خطأ للمستخدم.
- *
- * بمجرد ما يكون أي من هذه المتغيّرات موجوداً وتُعاد نشر (redeploy) المشروع،
- * التبديل التلقائي بين المزوّدين يشتغل من دون أي تعديل إضافي فهذا الملف.
- * كل مزوّد اختياري تماماً: لو ما ضفتش مفتاحه، السلسلة ببساطة تتخطّاه.
+ * الموثوقية بدون سلسلة مزوّدين: الطلب يحاول البث المباشر أولاً، وإذا فشل
+ * بخطأ قابل لإعادة المحاولة (429 أو 5xx) يعاود المحاولة على نفس الخادم
+ * مرتين بفاصل قصير قبل ما يظهر خطأ للمستخدم — شوف _withRetry() فتحت.
  * ------------------------------------------------------------------------- */
 const AI_PROXY_URL = '';
 
@@ -2175,11 +2193,11 @@ const ChatManager = {
 
         try {
             const models = await Vault.get('ab_model_ids', {
-                flash: 'gemini-3.5-flash', pro: 'gemini-3.1-pro-preview', image: 'imagen-4.0-generate-001'
+                flash: 'deepseek/deepseek-chat:free', pro: 'deepseek/deepseek-r1:free', image: 'google/gemini-2.5-flash-image:free'
             });
 
             if (imageModeOn) {
-                await this.requestImage(models.image || 'imagen-4.0-generate-001', text);
+                await this.requestImage(models.image || 'google/gemini-2.5-flash-image:free', text);
             } else {
                 await this.requestText(AppStore.getState().model === 'flash' ? models.flash : models.pro, attachments, webSearchOn);
             }
@@ -2233,9 +2251,9 @@ const ChatManager = {
         }
     },
 
-    // Low-level proxy call shared by the primary and fallback providers.
-    // Throws an Error whose `.status` is the HTTP status code, so callers
-    // can decide whether the failure is worth retrying on another provider.
+    // Low-level proxy call. Throws an Error whose `.status` is the HTTP
+    // status code, so callers can decide whether the failure is worth
+    // retrying.
     async _callProxy(path, body) {
         const endpoint = AI_PROXY_URL.replace(/\/$/, '') + path;
         const response = await fetch(endpoint, {
@@ -2257,58 +2275,80 @@ const ChatManager = {
         return response.json();
     },
 
-    // True for the class of errors worth switching providers over: rate
-    // limits / quota exhaustion (429), upstream server errors (5xx) — the
-    // "You exceeded your current quota" case from Gemini — and a 404,
-    // which happens when a tier's api/*.js file simply hasn't been
-    // deployed yet (e.g. you're still setting up Gemini/DeepSeek and only
-    // have OpenRouter live so far). That lets the chain skip a
-    // not-yet-configured tier instead of breaking entirely.
-    // Not true for real user-facing errors (bad request, invalid key, etc),
-    // which should surface as-is rather than being retried silently.
+    // True for the class of errors worth retrying: rate limits / quota
+    // exhaustion (429) and upstream server errors (5xx). Not true for real
+    // user-facing errors (bad request, invalid key, etc), which should
+    // surface as-is rather than being retried silently.
     isRetryableProviderError(error) {
         if (!error) return false;
-        if (error.status === 404 || error.status === 429 || (error.status >= 500 && error.status < 600)) return true;
+        if (error.status === 429 || (error.status >= 500 && error.status < 600)) return true;
         const msg = (error.message || '').toLowerCase();
         return msg.includes('quota') || msg.includes('rate limit') || msg.includes('rate_limit') || msg.includes('resource_exhausted');
     },
 
-    // Builds the `contents` array (Gemini's chat-history shape) from the
-    // current chat's stored messages, attaching any pending file/image parts
-    // to the last user turn. Shared by the streaming and non-streaming paths.
+    // Retries an async operation on retryable errors only (429 / 5xx), with
+    // a short growing delay between attempts. This is what keeps a
+    // single-provider (OpenRouter-only) setup resilient without a fallback
+    // chain of other providers: a transient hiccup gets a couple of quick
+    // retries against the SAME endpoint instead of failing immediately.
+    async _withRetry(fn, attempts = 3, baseDelayMs = 500) {
+        let lastError;
+        for (let i = 0; i < attempts; i++) {
+            try {
+                return await fn();
+            } catch (error) {
+                lastError = error;
+                if (error && error.name === 'AbortError') throw error;
+                if (i === attempts - 1 || !this.isRetryableProviderError(error)) throw error;
+                Toast.show('الخادم مشغول، إعادة المحاولة...', 'info', 1600);
+                await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (i + 1)));
+            }
+        }
+        throw lastError;
+    },
+
+    // Builds the OpenAI/OpenRouter-style `messages` array from the current
+    // chat's stored messages, attaching any pending file/image parts to the
+    // last user turn. Shared by the streaming and non-streaming paths.
     _buildTextContents(attachments) {
         const chat = AppStore.getState().chats.find((c) => c.id === AppStore.getState().currentChatId);
         const messages = chat ? chat.messages : [];
         const lastIndex = messages.length - 1;
 
         return messages.map((m, idx) => {
+            const role = m.role === 'user' ? 'user' : 'assistant';
+            const isLastUser = idx === lastIndex && m.role === 'user';
+            if (!isLastUser || !attachments.length) return { role, content: m.content || '' };
+
+            // Multimodal turn: OpenAI/OpenRouter vision format uses an array
+            // of typed parts instead of a plain string.
             const parts = [];
-            if (m.content) parts.push({ text: m.content });
-            if (idx === lastIndex && m.role === 'user') {
-                attachments.forEach((a) => {
-                    if (a.kind === 'image' || a.kind === 'pdf') {
-                        parts.push({ inline_data: { mime_type: a.mimeType, data: a.data } });
-                    } else if (a.kind === 'text') {
-                        parts.push({ text: '\n\n--- ملف مرفق: ' + a.name + ' ---\n' + a.data.slice(0, 20000) });
-                    } else {
-                        parts.push({ text: '\n\n(تم إرفاق ملف "' + a.name + '" لكن لا يمكن قراءة محتوى هذا النوع مباشرة في المتصفح.)' });
-                    }
-                });
-            }
-            return { role: m.role === 'user' ? 'user' : 'model', parts };
+            if (m.content) parts.push({ type: 'text', text: m.content });
+            attachments.forEach((a) => {
+                if (a.kind === 'image') {
+                    parts.push({ type: 'image_url', image_url: { url: 'data:' + a.mimeType + ';base64,' + a.data } });
+                } else if (a.kind === 'text') {
+                    parts.push({ type: 'text', text: '\n\n--- ملف مرفق: ' + a.name + ' ---\n' + a.data.slice(0, 20000) });
+                } else {
+                    parts.push({ type: 'text', text: '\n\n(تم إرفاق ملف "' + a.name + '" لكن لا يمكن قراءة محتوى هذا النوع مباشرة في المتصفح.)' });
+                }
+            });
+            return { role, content: parts };
         });
     },
 
-    // Streams the reply token-by-token from /api/generateTextStream (Gemini),
-    // growing a live bubble as chunks arrive. Throws on any failure — to
-    // start, or partway through — so the caller can fall back to the plain
-    // (non-streaming) endpoint chain without leaving a half-written bubble.
-    async _streamFromGemini(body) {
-        const endpoint = AI_PROXY_URL.replace(/\/$/, '') + '/api/generateTextStream';
+    // Streams the reply token-by-token from /api/generateTextOpenRouter
+    // using the standard OpenAI-compatible SSE shape ("data: {...}" lines
+    // ending with "data: [DONE]"), growing a live bubble as chunks arrive.
+    // Throws on any failure — to start, or partway through — so the caller
+    // can fall back to the plain (non-streaming) call without leaving a
+    // half-written bubble on screen.
+    async _streamFromOpenRouter(body) {
+        const endpoint = AI_PROXY_URL.replace(/\/$/, '') + '/api/generateTextOpenRouter';
         const response = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
+            body: JSON.stringify(Object.assign({}, body, { stream: true })),
             signal: this._activeAbort ? this._activeAbort.signal : undefined
         });
 
@@ -2353,14 +2393,13 @@ const ChatManager = {
                         error.status = evt.error.code || 500;
                         throw error;
                     }
-                    const candidate = evt.candidates && evt.candidates[0];
-                    const deltaText = candidate && candidate.content && candidate.content.parts
-                        ? candidate.content.parts.map((p) => p.text || '').join('')
-                        : '';
+                    const choice = evt.choices && evt.choices[0];
+                    const deltaText = choice && choice.delta ? (choice.delta.content || '') : '';
                     if (deltaText) { reply += deltaText; bubble.update(reply); }
-                    const chunks = candidate && candidate.groundingMetadata && candidate.groundingMetadata.groundingChunks;
-                    if (chunks && chunks.length) {
-                        sources = chunks.filter((c) => c.web && c.web.uri).slice(0, 6).map((c) => ({ title: c.web.title || c.web.uri, uri: c.web.uri }));
+                    const annotations = choice && choice.delta && choice.delta.annotations;
+                    if (annotations && annotations.length) {
+                        sources = annotations.filter((c) => c.url_citation && c.url_citation.url).slice(0, 6)
+                            .map((c) => ({ title: c.url_citation.title || c.url_citation.url, uri: c.url_citation.url }));
                     }
                 }
             }
@@ -2374,111 +2413,80 @@ const ChatManager = {
     },
 
     async requestText(modelId, attachments, webSearchOn) {
-        const contents = this._buildTextContents(attachments);
-        const body = {
-            modelId,
-            contents,
-            systemInstruction: { parts: [{ text: this.buildSystemInstruction() }] },
-            generationConfig: { temperature: 0.8, topK: 40, topP: 0.95, maxOutputTokens: 8192 }
-        };
-        if (webSearchOn) body.tools = [{ google_search: {} }];
+        const messages = this._buildTextContents(attachments);
+        messages.unshift({ role: 'system', content: this.buildSystemInstruction() });
+        // OpenRouter's ":online" suffix turns any model into a web-search-
+        // grounded one for that one request — no separate tool wiring needed.
+        const effectiveModel = (webSearchOn && !modelId.endsWith(':online')) ? modelId + ':online' : modelId;
+        const body = { model: effectiveModel, messages, temperature: 0.8, top_p: 0.95, max_tokens: 8192 };
 
         // 1) Try a real-time streamed reply first — this is what modern AI
         //    chat apps do: text appears progressively instead of all at once.
         try {
-            const { reply, sources, bubble } = await this._streamFromGemini(body);
+            const { reply, sources, bubble } = await this._streamFromOpenRouter(body);
             bubble.finish(reply, { sources });
             this.addMessage('bot', reply, { sources, skipDom: true });
             return;
         } catch (streamError) {
-            if (streamError && streamError.name === 'AbortError') throw streamError; // user hit "stop" — don't retry another provider
+            if (streamError && streamError.name === 'AbortError') throw streamError; // user hit "stop"
             console.warn('[requestText] streaming unavailable, falling back:', streamError);
             MessageRenderer.showTyping(); // no-op if already showing
         }
 
-        // 2) Streaming didn't work (older browser, network hiccup, or the
-        //    stream endpoint itself is down) — fall back to the plain call.
-        //    From there the chain is: Gemini -> DeepSeek -> OpenRouter,
-        //    trying the next tier only when the previous one failed with a
-        //    retryable error (quota/rate-limit/5xx), and surfacing which
-        //    one actually answered so the user isn't left guessing. Each tier is independently optional server-side —
-        //    a tier with no key configured just returns an error and the
-        //    chain moves on to the next one.
-        const fallbackBody = { contents: body.contents, systemInstruction: body.systemInstruction, generationConfig: body.generationConfig };
-        const chain = [
-            { path: '/api/generateText', body, name: 'gemini', label: null },
-            { path: '/api/generateTextFallback', body: fallbackBody, name: 'deepseek', label: 'تمت الإجابة عبر المزوّد الاحتياطي DeepSeek' },
-            { path: '/api/generateTextOpenRouter', body: fallbackBody, name: 'openrouter', label: 'تمت الإجابة عبر المزوّد الاحتياطي OpenRouter' }
-        ];
+        // 2) Streaming didn't work (older browser, network hiccup, or a
+        //    transient error) — fall back to a plain call against the SAME
+        //    OpenRouter endpoint, retried a couple of times on 429/5xx via
+        //    _withRetry() before surfacing an error to the user.
+        const data = await this._withRetry(() => this._callProxy('/api/generateTextOpenRouter', Object.assign({}, body, { stream: false })));
 
-        let data, providerUsed = 'gemini';
-        for (let i = 0; i < chain.length; i++) {
-            const tier = chain[i];
-            try {
-                data = await this._callProxy(tier.path, tier.body);
-                providerUsed = tier.name;
-                break;
-            } catch (tierError) {
-                const isLast = i === chain.length - 1;
-                if (isLast || !this.isRetryableProviderError(tierError)) throw tierError;
-                const next = chain[i + 1];
-                Toast.show('المزوّد ' + tier.name + ' غير متاح الآن، جارٍ المحاولة عبر ' + next.name + '...', 'info', 2600);
-            }
-        }
-
-        const candidate = data.candidates && data.candidates[0];
-        const reply = candidate && candidate.content && candidate.content.parts
-            ? candidate.content.parts.map((p) => p.text || '').join('')
-            : 'لم أتمكن من فهم سؤالك، حاول مرة أخرى.';
+        const choice = data.choices && data.choices[0];
+        const reply = choice && choice.message ? (choice.message.content || '') : '';
 
         let sources = null;
-        const chunks = candidate && candidate.groundingMetadata && candidate.groundingMetadata.groundingChunks;
-        if (chunks && chunks.length) {
-            sources = chunks.filter((c) => c.web && c.web.uri).slice(0, 6).map((c) => ({ title: c.web.title || c.web.uri, uri: c.web.uri }));
+        const annotations = choice && choice.message && choice.message.annotations;
+        if (annotations && annotations.length) {
+            sources = annotations.filter((c) => c.url_citation && c.url_citation.url).slice(0, 6)
+                .map((c) => ({ title: c.url_citation.title || c.url_citation.url, uri: c.url_citation.url }));
         }
 
-        const usedTier = chain.find((t) => t.name === providerUsed);
         MessageRenderer.hideTyping();
-        this.addMessage('bot', reply || '...', { sources, providerNote: usedTier ? usedTier.label : null });
-        if (providerUsed !== 'gemini' && webSearchOn) {
-            Toast.show('تنبيه: البحث في الويب غير متاح مؤقتاً أثناء استخدام المزوّد الاحتياطي', 'warning', 3400);
-        }
+        this.addMessage('bot', reply || 'لم أتمكن من فهم سؤالك، حاول مرة أخرى.', { sources });
     },
 
+    // Image generation also goes through the same single OpenRouter proxy
+    // (/api/generateTextOpenRouter) — just with an image-capable model id
+    // and `modalities: ['image','text']`. OpenRouter returns generated
+    // images inline on the assistant message as `message.images[]`, each
+    // `{ type: 'image_url', image_url: { url: 'data:image/...;base64,...' } }`.
     async requestImage(modelId, prompt) {
         if (!prompt) {
             MessageRenderer.hideTyping();
             this.addMessage('bot', 'اكتب وصفاً للصورة التي تريد توليدها.', { isError: true });
             return;
         }
-        const endpoint = AI_PROXY_URL.replace(/\/$/, '') + '/api/generateImage';
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ modelId, instances: [{ prompt }], parameters: { sampleCount: 1 } }),
-            signal: this._activeAbort ? this._activeAbort.signal : undefined
-        });
-
-        if (!response.ok) {
-            let message = 'تعذّر توليد الصورة (رمز ' + response.status + ')';
-            try {
-                const err = await response.json();
-                if (err && err.error && err.error.message) message = err.error.message;
-            } catch (e) { /* not JSON */ }
+        let data;
+        try {
+            data = await this._withRetry(() => this._callProxy('/api/generateTextOpenRouter', {
+                model: modelId,
+                messages: [{ role: 'user', content: prompt }],
+                modalities: ['image', 'text'],
+                stream: false
+            }));
+        } catch (error) {
             MessageRenderer.hideTyping();
-            this.addMessage('bot', '❌ ' + message + ' — تأكد أن معرّف نموذج توليد الصور صحيح في الإعدادات المتقدمة، وأن مفتاح الخادم مفعّل على هذا النموذج.', { isError: true });
+            this.addMessage('bot', '❌ ' + error.message + ' — تأكد أن معرّف نموذج توليد الصور صحيح في الإعدادات المتقدمة، وأنه يدعم إخراج الصور على OpenRouter.', { isError: true });
             return;
         }
 
-        const data = await response.json();
-        const pred = data.predictions && data.predictions[0];
-        const b64 = pred && (pred.bytesBase64Encoded || pred.b64_json);
+        const message = data.choices && data.choices[0] && data.choices[0].message;
+        const imagePart = message && message.images && message.images[0];
+        const url = imagePart && imagePart.image_url && imagePart.image_url.url;
         MessageRenderer.hideTyping();
-        if (!b64) {
-            this.addMessage('bot', 'لم يُرجع النموذج صورة صالحة. حاول صياغة الوصف بشكل مختلف.', { isError: true });
+        if (!url) {
+            this.addMessage('bot', 'لم يُرجع النموذج صورة صالحة. حاول صياغة الوصف بشكل مختلف، أو تأكد أن النموذج المختار يدعم توليد الصور.', { isError: true });
             return;
         }
-        this.addMessage('bot', 'إليك الصورة التي طلبتها: "' + prompt + '"', { image: 'data:image/png;base64,' + b64 });
+        this.addMessage('bot', 'إليك الصورة التي طلبتها: "' + prompt + '"', { image: url });
     },
 
     addMessage(role, content, opts = {}) {
@@ -2540,7 +2548,7 @@ const ChatManager = {
         this._setSendBtnState(true);
         try {
             const models = await Vault.get('ab_model_ids', {
-                flash: 'gemini-3.5-flash', pro: 'gemini-3.1-pro-preview', image: 'imagen-4.0-generate-001'
+                flash: 'deepseek/deepseek-chat:free', pro: 'deepseek/deepseek-r1:free', image: 'google/gemini-2.5-flash-image:free'
             });
             const s = AppStore.getState();
             await this.requestText(s.model === 'flash' ? models.flash : models.pro, [], s.webSearchOn);
@@ -2916,10 +2924,10 @@ const UI = {
 const SettingsPanel = {
     keyVisible: false,
     async open() {
-        const models = await Vault.get('ab_model_ids', { flash: 'gemini-3.5-flash', pro: 'gemini-3.1-pro-preview', image: 'imagen-4.0-generate-001' });
+        const models = await Vault.get('ab_model_ids', { flash: 'deepseek/deepseek-chat:free', pro: 'deepseek/deepseek-r1:free', image: 'google/gemini-2.5-flash-image:free' });
         document.getElementById('modelFastInput').value = models.flash;
         document.getElementById('modelProInput').value = models.pro;
-        document.getElementById('modelImageInput').value = models.image || 'imagen-4.0-generate-001';
+        document.getElementById('modelImageInput').value = models.image || 'google/gemini-2.5-flash-image:free';
         document.getElementById('devNameLabel').textContent = 'Abdelrezak Bezzag';
         const googleClientId = await Vault.get('ab_google_client_id', '');
         document.getElementById('googleClientIdInput').value = googleClientId || '';
@@ -2952,7 +2960,7 @@ const SettingsPanel = {
         const pro = document.getElementById('modelProInput').value.trim();
         const image = document.getElementById('modelImageInput').value.trim();
         if (!flash || !pro) { Toast.show('أدخل معرّفي النموذجين', 'warning'); return; }
-        await Vault.set('ab_model_ids', { flash, pro, image: image || 'imagen-4.0-generate-001' });
+        await Vault.set('ab_model_ids', { flash, pro, image: image || 'google/gemini-2.5-flash-image:free' });
         Toast.show('تم حفظ معرّفات النماذج', 'success');
     }
 };
@@ -3196,7 +3204,7 @@ const PWA = {
     deferredPrompt: null,
 
     init() {
-        this.injectManifest();
+        this.ensureManifestFallback();
         this.registerServiceWorker();
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
@@ -3210,29 +3218,36 @@ const PWA = {
         });
     },
 
-    injectManifest() {
-        try {
-            const manifest = {
-                name: 'abdelrezakbezzag - الذكاء الاصطناعي',
-                short_name: 'abdelrezakbezzag',
-                start_url: '.',
-                display: 'standalone',
-                background_color: '#0a0a1a',
-                theme_color: '#0a0a1a',
-                orientation: 'portrait-primary',
-                icons: [
-                    { src: document.getElementById('favicon').href, sizes: '100x100', type: 'image/svg+xml', purpose: 'any maskable' }
-                ]
-            };
-            const blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('link');
-            link.rel = 'manifest';
-            link.href = url;
-            document.head.appendChild(link);
-        } catch (e) {
-            console.warn('[PWA] manifest injection skipped:', e);
-        }
+    // The real manifest is linked statically in <head> (./manifest.webmanifest,
+    // shipped alongside this file — see GUIDE-PLAY-STORE.md). A manifest
+    // injected at runtime as a blob: URL cannot be used by Bubblewrap/TWA
+    // packaging (it needs a stable, fetchable HTTP URL), so this only adds
+    // a minimal in-memory fallback for the rare case the static file 404s —
+    // it keeps "Add to Home Screen" working, but is NOT a substitute for
+    // deploying manifest.webmanifest for real (Play Store packaging needs it).
+    ensureManifestFallback() {
+        const existing = document.querySelector('link[rel="manifest"]');
+        if (!existing) return;
+        fetch(existing.href, { method: 'HEAD' }).then((res) => {
+            if (res.ok) return;
+            throw new Error('manifest missing');
+        }).catch(() => {
+            try {
+                const manifest = {
+                    name: 'abdelrezakbezzag - الذكاء الاصطناعي',
+                    short_name: 'abdelrezakbezzag',
+                    start_url: '.',
+                    display: 'standalone',
+                    background_color: '#0a0a1a',
+                    theme_color: '#0a0a1a',
+                    orientation: 'portrait-primary',
+                    icons: [{ src: document.getElementById('favicon').href, sizes: '100x100', type: 'image/svg+xml', purpose: 'any' }]
+                };
+                const blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+                existing.href = URL.createObjectURL(blob);
+                console.warn('[PWA] manifest.webmanifest was not found on the server — using an in-memory fallback. Deploy the real file for Play Store packaging.');
+            } catch (e) { /* best effort */ }
+        });
     },
 
     registerServiceWorker() {
@@ -3240,41 +3255,14 @@ const PWA = {
             console.info('[PWA] Service workers are not supported in this browser.');
             return;
         }
-        // A minimal offline-shell service worker, embedded as a Blob so the whole
-        // app can ship as one file. Some browsers restrict registering a worker
-        // from a blob: URL (especially when the page itself is opened via
-        // file://) — this is expected and handled gracefully below. For a real
-        // deployment, host this as a separate /sw.js served over HTTPS instead.
-        const swSource = "\n" +
-            "const CACHE_NAME = 'ab-shell-v1';\n" +
-            "self.addEventListener('install', (event) => { self.skipWaiting(); });\n" +
-            "self.addEventListener('activate', (event) => { event.waitUntil(self.clients.claim()); });\n" +
-            "self.addEventListener('fetch', (event) => {\n" +
-            "  if (event.request.method !== 'GET') return;\n" +
-            "  event.respondWith(\n" +
-            "    caches.open(CACHE_NAME).then(async (cache) => {\n" +
-            "      const cached = await cache.match(event.request);\n" +
-            "      const network = fetch(event.request).then((response) => {\n" +
-            "        if (response && response.ok && event.request.url.startsWith(self.location.origin)) {\n" +
-            "          cache.put(event.request, response.clone());\n" +
-            "        }\n" +
-            "        return response;\n" +
-            "      }).catch(() => cached);\n" +
-            "      return cached || network;\n" +
-            "    })\n" +
-            "  );\n" +
-            "});\n";
-        try {
-            const blob = new Blob([swSource], { type: 'application/javascript' });
-            const url = URL.createObjectURL(blob);
-            navigator.serviceWorker.register(url).then(() => {
-                console.info('[PWA] Offline shell service worker registered.');
-            }).catch((err) => {
-                console.info('[PWA] Service worker registration was skipped by the browser (expected for blob: scope or file:// origin):', err.message);
-            });
-        } catch (e) {
-            console.info('[PWA] Service worker setup skipped:', e);
-        }
+        // Registers the real, statically hosted ./sw.js (shipped alongside
+        // this file). A blob:-based worker cannot cache the app shell for a
+        // real offline TWA install, so this deployment ships an actual file.
+        navigator.serviceWorker.register('./sw.js').then(() => {
+            console.info('[PWA] Offline shell service worker registered.');
+        }).catch((err) => {
+            console.info('[PWA] Service worker registration failed (expected if sw.js was not deployed, or on a file:// origin):', err.message);
+        });
     },
 
     async promptInstall() {
